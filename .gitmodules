@@ -1,0 +1,3 @@
+[submodule "3rdparty/quack"]
+	path = 3rdparty/quack
+	url = https://github.com/Dao-AILab/quack.git
