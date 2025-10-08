@@ -942,3 +942,605 @@ pytest -q
 等你运行一遍（尤其是 `bench-topk --impl quack`），把输出/报错贴给我，我会基于真实输出帮你**完善 QuACK 接口适配**和**下一步的内核替换建议**。
 ::contentReference[oaicite:0]{index=0}
 ```
+
+目前的运行结果如何？
+
+结论先说在前面：
+
+* 你现在这组 **micro (Top‑K)** 和 **routing-only (identity experts)** 的基准结果**是合理的**。
+  *Top‑K* 微基准里，`quack` 比 `torch` 版本快约 **2.4%**（0.3157→0.3083 ms）；
+  但在 **routing_identity**（包含 *top‑k + 打包/回收*）里，两者差异 **≈0.02 ms**，远小于抖动，**几乎不可见**——这很符合预期：路由阶段的*主要瓶颈不是 top‑k 自身*，而是 **pack/unpack（gather/scatter/重排）** 等内存带宽受限操作。
+
+---
+
+## 为什么说“符合预期”？（用你的数字快速校验）
+
+以 `bench-routing` 为例（N=16,384 tokens，H=4,096，K=2，FP16）：
+
+* 仅就 **数据搬运** 粗略估算：
+  每个 token 在 *dispatch* 需要搬 `H × K × 2 bytes = 4096×2×2 = 16,384 bytes`；
+  *combine* 另一次同量搬运；**往返共 ~32 KB/token**。
+  总量 ≈ `16,384 tokens × 32 KB ≈ 512 MiB`。
+* 你的计时 `~3.40 ms` ⇒ 实测带宽 ≈ `512 MiB / 3.40 ms ≈ 150–160 GB/s`。
+  对单卡（特别是随机访问/重排型访问）来说，这是一个**非常合理**的“有效带宽”水平（远低于 HBM 峰值是正常的，重排访问+核启动/同步开销很难吃满带宽）。
+
+而 *Top‑K 选择* 本身只做一次 `topk(logits)`，强度小得多，所以 **微基准能看出 2–3% 的实现差异**，但放到包含 **pack/unpack** 的 *routing* 总时间里，这点差异只占总时长 ~9–10% 的一小部分，**贡献到总时长的边际收益 <0.3%**，被噪声淹没——与你的测得现象吻合。
+
+> 粗略算一下份额：`T_total ≈ 3.40 ms`，`T_topk ≈ 0.31 ms`，
+> `quack` 在 Top‑K 上省 ~0.0075 ms ⇒ 对总时长的节省约 **0.22%**（很难测出来）。
+
+---
+
+## 动态路由算法要比较什么“性能”？
+
+分成 **系统指标** 与 **模型质量** 两大块。课程项目的叙述也强调“参数高效 & 动态路由”，所以建议做**双指标帕累托**（系统速度/成本 vs. 质量）。
+
+### 1) 系统侧（训练 & 推理通用）
+
+**主指标（建议在每个实验图中都报）：**
+
+* **吞吐（throughput）**：tokens/s（或 sequences/s）。
+  训练用 *samples/s* + *tokens/s* 都要报；推理一般用 *tokens/s*。
+* **延迟（latency）**：单步 forward/backward 的 wall‑time；推理看 P50/P95。
+* **路由开销占比**：Top‑K、pack、all‑to‑all（若多卡）、combine 各自的时间份额。
+* **显存占用**：峰值显存、激活占用；不同 `top_k` / 容量因子 CF 下的变化。
+* **（如多卡）通信开销**：All‑to‑All 的时间/占比、传输字节数、有效带宽。
+
+**辅助指标：**
+
+* **专家负载均衡度**：tokens-per-expert 的 **CV 值** 或与均匀分布的 **KL**；
+  **溢出/丢弃率**（capacity factor 导致的 drop）。
+* **有效带宽**：以「搬运字节 / 时间」折算（就像上面的 150–160 GB/s）。
+* **可扩展性**：弱/强扩展（Experts 数、`top_k`、序列长、batch 的变化曲线）。
+
+### 2) 模型质量侧（训练为主，推理看保真/稳健性）
+
+* **验证困惑度/损失**（LM）：如 ppl on held‑out set。
+* **任务指标**：分类/问答/翻译等的 Accuracy/F1/ROUGE…（选 1–2 个小任务即可）。
+* **收敛速度/样本效率**：达到相同 ppl/accuracy 所需的 **训练 tokens** 或 **时间**。
+* **稳定性**：是否出现**专家塌缩**（负载严重不均）、是否需要 z‑loss/aux‑loss 才稳定。
+
+> **如何读结果**：
+> 动态路由 A 优于 B 的充分证据是：**在相同计算/时间预算下**，A 达到 **更低的 ppl 或更高的准确率**；或 **在相同质量水平下**，A 的 **tokens/s 更高 / 成本更低**。
+> 这就是你报告里推荐的 **帕累托曲线**（质量 vs. 速度/成本）。
+
+---
+
+## 具体到你项目里的“下一步怎么量”
+
+你现在已经有：
+
+* `bench-topk`（Top‑K 微基准）
+* `bench-routing`（路由打包/回收 + identity expert）
+
+建议**马上补齐**下面 3 类基准（先单卡）：
+
+1. **pack/unpack 微基准（最关键）**
+   单独计时 *pack*（按 expert 分桶重排）与 *combine*（按 gate 写回/加权）。
+
+   * 先给一个 **Torch baseline**（排序+索引：稳定但不快），跑通功能与校验；
+   * 再在同一接口下挂上 **QuACK/CuTe‑DSL** 版本（收到正确性回归后再比速度）。
+   * **输出**：avg ms / std / tokens/s / 有效带宽（用上面的 32KB/token 折算）。
+
+2. **MoE‑FFN 层微基准（不含注意力）**
+   *routing + grouped GEMM + combine*，expert 用两层 FFN（`H->4H->H`）。
+
+   * 目的：看路由开销相对 GEMM 的占比、不同 `top_k`/CF 的平衡点。
+   * **输出**：层时延、GEMM TFLOP/s、路由份额。
+
+3. **端到端“小模型”**
+   在一个 **小型 Transformer** 中把 FFN 换成 MoE‑FFN（Top‑1/Top‑2/Soft‑MoE 各 1 个），在一个小语料（如 1–5GB 文本或 TinyStories/WT2）上训练 **若干千步**。
+
+   * **输出**：验证 ppl 曲线、每步 ms、tokens/s、显存、是否有丢弃/塌缩。
+   * 这个环节回答“**动态路由有没有伤害/提升质量**”。
+
+> 你问“到底比速度/吞吐/延迟还是 eval 百分数？”
+> **都要比**，但分工明确：
+>
+> * **微基准**（Top‑K、pack/unpack、MoE‑FFN）→ *系统侧*（吞吐/延迟/带宽/占比）。
+> * **小模型训练/eval** → *质量侧*（ppl/accuracy/收敛）。
+>   这样在报告里能清楚说明：**哪个路由更“快”、哪个更“好”、以及为何**。
+
+---
+
+## 你这批结果的两个小建议
+
+1. **把 micro 的迭代数对齐**（100 vs 200）并重复 3 次取均值/置信区间。
+   以你现有数据粗算 95% 置信区间：
+
+   * `torch topk`: ±0.00016 ms；`quack topk`: ±0.00255 ms；
+   * 两者均值差 ~0.0075 ms，**在 micro 层面显著**；但在 routing 总时长上不可见，这是正常的。
+2. **分解 routing 时长**（推荐用 NVTX / PyTorch profiler）：
+   加上 `topk` / `make_indices` / `pack` / `combine` / `sync` 的区段标记，一眼看到瓶颈。
+   经验上 **pack/combine** 会吃掉 >70% 的 routing 时间。
+
+---
+
+## 立即可用的一段基准代码（Torch baseline 的 pack/unpack）
+
+> 目的：先把 **pack/unpack 的接口** 跑通与校验，形成 `bench-pack`。
+> 说明：这是纯 Torch 的“排序 + 索引”参考实现，便于后续换成 QuACK/CuTe‑DSL 内核做对比。
+
+```python
+# 保存为 scripts/bench_pack.py
+import argparse, json, time
+import torch
+
+def pack_by_expert_torch(x, assign, num_experts):
+    # x: [N, H], assign: [N, K] int64 in [0, E)
+    N, H = x.shape
+    K = assign.shape[1]
+    expert = assign.reshape(-1)                      # [N*K]
+    x_rep = x.repeat_interleave(K, dim=0)           # [N*K, H]
+    order = torch.argsort(expert, stable=True)      # group by expert
+    x_packed = x_rep.index_select(0, order)         # [N*K, H]
+    counts = torch.bincount(expert, minlength=num_experts)  # [E]
+    starts = torch.cumsum(counts, dim=0) - counts            # [E]
+    meta = (order, counts, starts, N, K, H, num_experts)
+    return x_packed, meta
+
+def unpack_by_expert_torch(y_packed, meta, gate_w=None):
+    order, counts, starts, N, K, H, E = meta
+    # invert 'order' so we can map back to [N*K, H]
+    inv = torch.empty_like(order)
+    inv[order] = torch.arange(order.numel(), device=order.device)
+    y_rep = y_packed.index_select(0, inv).reshape(N, K, H)   # [N, K, H]
+    if gate_w is not None:
+        y_rep = y_rep * gate_w.unsqueeze(-1)                 # 加权写回
+    y = y_rep.sum(dim=1).contiguous()                        # [N, H]
+    return y
+
+def bench(args):
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda")
+    N, H, E, K = args.num_tokens, args.hidden_dim, args.num_experts, args.top_k
+    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
+
+    x = torch.randn(N, H, device=device, dtype=dtype)
+    logits = torch.randn(N, E, device=device, dtype=torch.float32)  # router logits
+    gate_w, assign = torch.topk(logits, k=K, dim=-1)                 # [N, K] float32, int64
+    assign = assign.to(torch.int64)
+    gate_w = torch.softmax(gate_w, dim=-1).to(dtype)
+
+    # warmup
+    for _ in range(args.warmup):
+        y_packed, meta = pack_by_expert_torch(x, assign, E)
+        _ = unpack_by_expert_torch(y_packed, meta, gate_w)
+
+    torch.cuda.synchronize()
+    t0 = time.time()
+    iters = args.iters
+    for _ in range(iters):
+        y_packed, meta = pack_by_expert_torch(x, assign, E)
+        _ = unpack_by_expert_torch(y_packed, meta, gate_w)
+    torch.cuda.synchronize()
+    t1 = time.time()
+    avg_ms = (t1 - t0) * 1000.0 / iters
+
+    # 计算等效带宽：2 次搬运（pack + combine）
+    bytes_per_token = H * K * 2 * 2  # H * K * 2bytes * 2 passes
+    total_bytes = N * bytes_per_token
+    gbps = (total_bytes / (avg_ms / 1e3)) / 1e9
+    result = {
+        "name": "pack+combine_torch_baseline",
+        "avg_ms": avg_ms,
+        "tokens_per_s": N / (avg_ms / 1e3),
+        "eff_bandwidth_GBps": gbps,
+        "num_tokens": N,
+        "hidden_dim": H,
+        "num_experts": E,
+        "top_k": K,
+        "dtype": str(dtype).replace("torch.", ""),
+        "device": str(device),
+        "seed": args.seed,
+        "warmup": args.warmup,
+        "iters": args.iters,
+    }
+    print(json.dumps(result, indent=2))
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--num-tokens", type=int, default=16384)
+    p.add_argument("--hidden-dim", type=int, default=4096)
+    p.add_argument("--num-experts", type=int, default=128)
+    p.add_argument("--top-k", type=int, default=2)
+    p.add_argument("--dtype", type=str, default="float16", choices=["float16","bfloat16"])
+    p.add_argument("--warmup", type=int, default=10)
+    p.add_argument("--iters", type=int, default=100)
+    p.add_argument("--seed", type=int, default=17)
+    args = p.parse_args()
+    bench(args)
+```
+
+运行示例：
+
+```bash
+python scripts/bench_pack.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
+```
+
+有了这个 **Torch 基线**，你就可以在相同接口下实现 `pack_by_expert_quack()`（CuTe‑DSL 版本），替换调用并直接得到 apples‑to‑apples 的速度/带宽对比。
+
+---
+
+## 报告里该怎么组织实验结果（建议结构）
+
+1. **Top‑K 微基准**：不同 `K∈{1,2,4}`、`E∈{32,64,128}` 的曲线；`quack` 相对 `torch` 的速度提升。
+2. **pack/unpack 微基准**：同样 sweep 参数 + **有效带宽**（GB/s）；展示瓶颈在 pack/combine。
+3. **MoE‑FFN 层微基准**：显示“路由份额 vs GEMM”的占比（Stacked bar）。
+4. **端到端质量**：小模型在固定训练 tokens 下的 ppl 曲线；不同路由（Top‑1/Top‑2/Soft‑MoE）的质量‑速度帕累托。
+5. **负载均衡**：CV/溢出率随训练进程变化，是否需要/用了哪种 aux loss。
+
+---
+
+### 小结
+
+* 你的结果**对**：Top‑K 的实现差异在 micro 层面可见，但在 routing 总时长上 **几乎被 pack/unpack 吞噬**——这正是 MoE 路由优化的核心难点与价值点。
+* “动态路由算法的性能”需要 **系统指标 + 质量指标** 双轨评估；报告里建议用 **帕累托前沿** 来展示不同策略的权衡。
+* 上面给了一个可直接跑的 **pack/unpack Torch 基线**；把它放进 repo（例如 `scripts/bench_pack.py`），你就能马上得到路由主瓶颈的数字基础；随后替换为 **CuTe‑DSL/QuACK** 版本进行对比，就是你项目的技术亮点。
+
+结论先说在前面：
+**结果看起来合理**，我们的 `pack+combine (torch baseline)` 在 `16384×4096、E=128、k=2、fp16` 下测到 **3.37 ms**、按你设定的 *32KB/token* 折算到 **159.5 GB/s** 的有效带宽，这与我们用“排序+索引”的基线实现的期望量级一致（明显低于 HBM 上限，说明还有优化空间）。这一步相当于把**路由阶段的内存瓶颈**跑通了。
+
+> 小注：你当前用的**32KB/token**是假设（便于横向比较）。严格来说，对 *pack+combine*，`k=2、H=4096、fp16` 的**理论字节**约是 *48KB/token*（pack：读 1×H、写 2×H；combine：读 2×H、写 1×H），如果用 48KB 折算，这一条目会是 ~**239 GB/s**。**关键是统一口径**：报告里把口径写清楚，两种口径都给也行。
+
+---
+
+## 你问“比较动态路由算法到底比较什么？”
+
+我们建议把指标分成四层，兼顾“系统性能”和“学习效果”：
+
+1. **核/算子级**（pack、top‑k、combine、all‑to‑all）：
+
+   * 平均/尾延迟（ms）、吞吐（tokens/s）、**有效带宽**（GB/s）、SM 占用、L2/L1 命中（如有 Nsight 数据）。
+   * **负载统计**：每个 expert 的 token 数分布、CV（变异系数）、**overflow/drop rate**（当 CF<1 或路由不均衡时）。
+2. **层级（MoE‑FFN）**：
+
+   * 总时延拆解：`router(topk+pack) / GEMM / combine` 的**时间占比**；GEMM 的 **TFLOP/s** 与理想值的差距。
+3. **模型级（训练/推理吞吐）**：
+
+   * 训练：每步 ms / tokens/s / 显存 / 稳定性（是否塌缩到少数专家）。
+   * 推理：prompt/生成吞吐、batch 扩展性。
+4. **质量（仅训练实验）**：
+
+   * 验证集 ppl/准确率随 tokens 的曲线；**速度‑质量帕累托**（例如 Top‑1 vs Top‑2 vs Soft‑MoE）。
+
+> 课程要求里“参数高效/动态路由趋势”的讨论，重点就是把**路由策略**如何改变 (1)~(3)，以及是否在 (4) 上带来可测的差异。
+
+---
+
+## Roadmap（可直接当 Milestones 用）
+
+把你刚跑通的 `pack+combine` 当 **M0**，在此基础上做 **M1→M3**。每个里程碑都有**可提交的脚本和图表**。
+
+### ✅ M0（已完成） — Torch 基线的 pack+combine 微基准
+
+* 目标：确认指标口径、把 JSON 输出持久化（`results/*.jsonl`）。
+* 产出：当前的 1 组点位 + 代码。
+* 立刻行动：做 **参数 sweep**，得到 3×3×3 的网格（`E∈{32,64,128}, k∈{1,2,4}, T×H 至少两档`）。
+
+> 下面给你一个**可直接放进仓库运行的 sweep 脚本**。
+
+**`scripts/sweep_pack.py`**
+
+```python
+#!/usr/bin/env python3
+import argparse, json, subprocess, sys, os, itertools, datetime, pathlib
+
+def run_once(py, num_tokens, hidden_dim, num_experts, top_k, iters, dtype):
+    cmd = [
+        sys.executable, "scripts/bench_pack.py",
+        "--num-tokens", str(num_tokens),
+        "--hidden-dim", str(hidden_dim),
+        "--num-experts", str(num_experts),
+        "--top-k", str(top_k),
+        "--iters", str(iters),
+        "--dtype", dtype,
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    return json.loads(out)
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--tokens", type=str, default="8192,16384,32768")
+    p.add_argument("--hidden", type=str, default="2048,4096")
+    p.add_argument("--experts", type=str, default="32,64,128")
+    p.add_argument("--topk", type=str, default="1,2,4")
+    p.add_argument("--iters", type=int, default=100)
+    p.add_argument("--dtype", type=str, default="float16")
+    p.add_argument("--out", type=str, default="results/pack.jsonl")
+    args = p.parse_args()
+
+    grids = {
+        "num_tokens": [int(x) for x in args.tokens.split(",") if x],
+        "hidden_dim": [int(x) for x in args.hidden.split(",") if x],
+        "num_experts": [int(x) for x in args.experts.split(",") if x],
+        "top_k": [int(x) for x in args.topk.split(",") if x],
+    }
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with open(args.out, "a") as f:
+        for nt, hd, ne, k in itertools.product(
+            grids["num_tokens"], grids["hidden_dim"], grids["num_experts"], grids["top_k"]
+        ):
+            res = run_once(sys.executable, nt, hd, ne, k, args.iters, args.dtype)
+            res["ts"] = datetime.datetime.now().isoformat()
+            print(json.dumps(res))
+            f.write(json.dumps(res) + "\n")
+
+if __name__ == "__main__":
+    main()
+```
+
+**运行示例**
+
+```bash
+python scripts/sweep_pack.py --tokens 8192,16384 --hidden 2048,4096 --experts 32,64,128 --topk 1,2,4 --iters 100
+```
+
+---
+
+### 🧩 M1 — 拆解路由阶段：单独的 pack 与 combine（Torch vs QuACK）
+
+**目标**：分开计时 *pack* 与 *combine*，并在相同接口下切换 **QuACK/CuTe‑DSL** 版本（正确性优先，再比速度）。
+
+* 代码结构建议：
+
+  ```
+  moe_routing_bench/
+    routers/
+      pack_torch.py
+      pack_quack.py           # 先返回 NotImplemented，再逐步填
+      combine_torch.py
+      combine_quack.py        # 同上
+    metrics/
+      routing_stats.py        # CV/overflow/entropy 统计
+  scripts/
+    bench_pack_only.py        # 只测 pack
+    bench_combine_only.py     # 只测 combine
+  ```
+* 指标口径（报告里固定写清楚）：
+
+  * **有效带宽**：`BW = (bytes_moved / time)`；建议**同时**给出
+
+    * **BW‑32K**：沿用你现在的 *32KB/token* 口径（便于横向对比）；
+    * **BW‑strict**：按 `(k+1)*H*2B` 估算 **pack** 和 **combine**，两者相加得到 `≈ 48KB/token`（对 `k=2, H=4096, fp16`）。
+  * **负载统计**（用于分析路由算法的系统效应）：`counts[e]`、`CV = std/mean`、`overflow_rate`、`gating_entropy`。
+
+> 正确性回归：**pack→combine 应为恒等映射**（忽略溢出时），误差容忍 `atol=1e-3`（fp16）。把这个做成 `pytest`。
+
+---
+
+### ⚙️ M2 — MoE‑FFN 层微基准（不含注意力）
+
+**目标**：测 `router + grouped GEMM + combine` 的**时间分摊**，观察不同 `k、E、CF` 下路由占比何时成为瓶颈。
+
+**实现权衡（避免显存爆炸）**
+
+* 为了先跑通**性能侧**，可以**共享专家权重**（每个专家用同一对 `W1/W2`）——这样不会影响我们在乎的“路由开销 vs GEMM”的时间比例；报告里注明“microbench 权重共享，用于系统分析”。
+* 后续如需“真专家权重”，把 `H=1024` 或 `E` 降低即可。
+
+**给你一个可跑的基准脚本骨架（Torch baseline）**
+
+> 这个脚本实现了：top‑k→pack（排序重排实现）→两层 FFN（共享权重）→combine（`scatter_add_`，带权重），并输出拆解后的耗时、GEMM FLOPs/TFLOP/s、负载统计与 overflow。
+
+**`scripts/bench_moe_layer.py`**
+
+```python
+#!/usr/bin/env python3
+import argparse, json, time
+import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+
+def topk_router(logits, k):
+    # logits: [N, E]
+    topk = torch.topk(logits, k=k, dim=-1)           # values, indices
+    gate_idx = topk.indices                          # [N, k]
+    # 归一化权重（softmax on selected experts）
+    gate_w = torch.softmax(topk.values, dim=-1)      # [N, k]
+    return gate_idx, gate_w
+
+@torch.no_grad()
+def pack_by_expert(x, gate_idx):
+    # x: [N, H], gate_idx: [N, k] in [0..E)
+    N, H = x.shape
+    k = gate_idx.shape[1]
+    flat_e = gate_idx.reshape(-1)                    # [N*k]
+    flat_t = torch.arange(N, device=x.device).repeat_interleave(k)  # [N*k]
+
+    # 排序重排：同 expert 的 token 紧邻
+    order = torch.argsort(flat_e, stable=True)
+    sorted_e = flat_e[order]
+    sorted_t = flat_t[order]
+
+    # 统计每个 expert 的 load
+    E = int(torch.max(flat_e).item()) + 1
+    counts = torch.bincount(flat_e, minlength=E)     # [E]
+    offsets = torch.zeros(E+1, device=x.device, dtype=torch.int32)
+    offsets[1:] = torch.cumsum(counts, dim=0)
+
+    packed = x[sorted_t]                             # [N*k, H]
+    return packed, sorted_e, sorted_t, offsets, counts
+
+@torch.no_grad()
+def combine_to_tokens(y_packed, sorted_e, sorted_t, offsets, gate_idx, gate_w, H):
+    # y_packed: [N*k, H]（与 pack 的排序一致）
+    N = gate_idx.shape[0]; k = gate_idx.shape[1]
+    out = torch.zeros((N, H), device=y_packed.device, dtype=y_packed.dtype)
+
+    # 恢复：对每个条目，按 token 累加加权和
+    # 这里直接用 sorted_t 做 scatter_add
+    # 权重要与排序后的一一对应
+    flat_w = gate_w.reshape(-1)
+    order = torch.argsort(sorted_e, stable=True)  # same 'order' as pack
+    w_sorted = flat_w[order]
+
+    out.scatter_add_(0, sorted_t.unsqueeze(-1).expand_as(y_packed), y_packed * w_sorted.unsqueeze(-1))
+    return out
+
+def bench_once(args):
+    torch.manual_seed(args.seed)
+    device = torch.device("cuda")
+    dtype = torch.float16 if args.dtype=="float16" else torch.bfloat16
+
+    N, H, E, k = args.num_tokens, args.hidden_dim, args.num_experts, args.top_k
+    x = torch.randn(N, H, device=device, dtype=dtype)
+
+    # 生成路由 logits（可换成 Zipf 分布做非均匀负载）
+    logits = torch.randn(N, E, device=device, dtype=torch.float32)
+
+    # 预热
+    for _ in range(5):
+        _ = x.norm(); torch.cuda.synchronize()
+
+    # 计时：router
+    t0 = torch.cuda.Event(True); t1 = torch.cuda.Event(True)
+    t0.record()
+    gate_idx, gate_w = topk_router(logits, k)
+    t1.record(); torch.cuda.synchronize()
+    router_ms = t0.elapsed_time(t1)
+
+    # 计时：pack
+    t2 = torch.cuda.Event(True); t3 = torch.cuda.Event(True)
+    t2.record()
+    packed, sorted_e, sorted_t, offsets, counts = pack_by_expert(x, gate_idx)
+    t3.record(); torch.cuda.synchronize()
+    pack_ms = t2.elapsed_time(t3)
+
+    # 计时：FFN（共享权重）
+    exp = args.expand
+    W1 = torch.randn(H, exp*H, device=device, dtype=dtype) / (H**0.5)
+    W2 = torch.randn(exp*H, H, device=device, dtype=dtype) / ((exp*H)**0.5)
+
+    t4 = torch.cuda.Event(True); t5 = torch.cuda.Event(True)
+    t4.record()
+    y = torch.nn.functional.gelu(packed @ W1)
+    y = y @ W2
+    t5.record(); torch.cuda.synchronize()
+    ffn_ms = t4.elapsed_time(t5)
+
+    # 计时：combine
+    t6 = torch.cuda.Event(True); t7 = torch.cuda.Event(True)
+    t6.record()
+    out = combine_to_tokens(y, sorted_e, sorted_t, offsets, gate_idx, gate_w, H)
+    t7.record(); torch.cuda.synchronize()
+    combine_ms = t6.elapsed_time(t7)
+
+    total_ms = router_ms + pack_ms + ffn_ms + combine_ms
+
+    # FLOPs（共享权重近似）：两层 Linear，m = N*k
+    m = N * k
+    flops = 2*m*H*(exp*H) + 2*m*(exp*H)*H   # = 4*m*exp*H^2 * 2 = 8*m*exp*H^2
+    tflops = flops / (total_ms/1e3) / 1e12
+
+    # 负载统计
+    counts_cpu = counts.to(torch.float32).cpu()
+    mean_load = counts_cpu.mean().item()
+    std_load = counts_cpu.std(unbiased=False).item()
+    cv = std_load / (mean_load + 1e-9)
+
+    # 有效带宽估计（两种口径）
+    bytes_per_token_32k = 32*1024
+    bytes_per_token_strict = 48*1024  # 近似：k=2、H=4096、fp16 时，pack+combine 总读写
+    bw32 = (N*bytes_per_token_32k) / ( (pack_ms+combine_ms)/1e3 ) / 1e9
+    bwst = (N*bytes_per_token_strict) / ( (pack_ms+combine_ms)/1e3 ) / 1e9
+
+    return {
+        "name": "moe_ffn_layer_microbench",
+        "avg_ms_total": total_ms,
+        "router_ms": router_ms,
+        "pack_ms": pack_ms,
+        "ffn_ms": ffn_ms,
+        "combine_ms": combine_ms,
+        "tflops_total": tflops,
+        "routing_share": (router_ms+pack_ms+combine_ms)/total_ms,
+        "bw_GBps_32k": bw32,
+        "bw_GBps_strict": bwst,
+        "num_tokens": N, "hidden_dim": H, "num_experts": E, "top_k": k,
+        "expand": exp, "dtype": args.dtype, "device": "cuda",
+        "load_mean": mean_load, "load_cv": cv,
+        "iters": 1, "seed": args.seed
+    }
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--num-tokens", type=int, default=16384)
+    ap.add_argument("--hidden-dim", type=int, default=1024)   # 先用小 H 跑通
+    ap.add_argument("--num-experts", type=int, default=32)
+    ap.add_argument("--top-k", type=int, default=2)
+    ap.add_argument("--expand", type=int, default=4)
+    ap.add_argument("--dtype", type=str, default="float16")
+    ap.add_argument("--seed", type=int, default=17)
+    args = ap.parse_args()
+
+    res = bench_once(args)
+    print(json.dumps(res, ensure_ascii=False))
+
+if __name__ == "__main__":
+    main()
+```
+
+**运行示例**
+
+```bash
+python scripts/bench_moe_layer.py --num-tokens 8192 --hidden-dim 1024 --num-experts 64 --top-k 2 --expand 4
+```
+
+> 备注：`hidden-dim=4096, E=128` 时若做“真专家权重”，显存会非常大（单层就可能 >30GB）。建议先用共享权重或减小 H/E 跑通“时间分摊”，再逐步加大规模。
+
+---
+
+### 📈 M3 — 端到端（小模型训练 & 推理）
+
+* **训练（质量‑速度帕累托）**：
+
+  * 在一个小 Transformer（例如 6 层、`d_model=512`、`seq=512`）上把 FFN 替换为 MoE‑FFN，做 3 个变体：**Top‑1 / Top‑2 / Soft‑MoE**。
+  * 数据：可用一个小语料（TinyStories/WikiText‑2 等）跑 **几千步**。
+  * 输出：验证 ppl 曲线、每步 ms、tokens/s、显存、`CV/overflow` 随训练步的变化曲线。
+* **推理**：固定检查点下，测 batch 扩展下的 tokens/s，并汇报单 step 延迟与峰值吞吐。
+
+---
+
+## 报告组织（建议目录 & 图表）
+
+1. **背景 & 相关工作**（路由算法演化：Top‑k/Top‑1、Soft‑MoE、Learning‑to‑Specialize、PERFT、Chain‑of‑Experts 等；以及系统侧 MegaBlocks/Tutel 思路的要点）。
+2. **方法学**：把路由阶段分解为 `topk→pack→(grouped)GEMM→combine`，用布局视角解释为什么是**访存瓶颈**；说明 CuTe‑DSL/QuACK 的设计点。
+3. **实验设置**：硬件、软件、口径（**有效带宽口径写清楚**）、网格参数、负载分布。
+4. **结果（系统侧）**：
+
+   * 图 A：`Top‑K` 微基准（Torch vs QuACK）速度曲线；
+   * 图 B：`pack/combine` 有效带宽 vs (`E`,`k`,`T×H`)，以及相对加速比；
+   * 图 C：`MoE‑FFN` 时间分摊堆叠图（router vs GEMM）；
+   * 表 D：`CV/overflow` 与性能的相关性。
+5. **结果（质量侧）**：
+
+   * 验证 ppl 曲线（Top‑1/Top‑2/Soft‑MoE）；
+   * 帕累托图（质量 vs tokens/s）。
+6. **讨论**：
+
+   * 动态路由对系统与质量的权衡；
+   * 参数高效微调（PERFT）与路由的结合；
+   * 未来工作：多卡 All‑to‑All、block‑sparse 路径等。
+
+---
+
+## 你现在可以立刻做的 5 件事
+
+1. **跑 sweep**：执行上面的 `scripts/sweep_pack.py`，把结果写到 `results/pack.jsonl`。
+2. **拆 pack/combine**：复制你已有的 `scripts/bench_pack.py`，拆成 `bench_pack_only.py / bench_combine_only.py`，分别计时，并把**BW‑32K / BW‑strict**都打印。
+3. **添加统计**：在基准里记录 `counts[e]、CV、overflow_rate`（如暂未实现容量丢弃，可先记 CV）。
+4. **M2 脚本落地**：把 `scripts/bench_moe_layer.py` 放进仓库，用共享权重版本先出一张**时间分摊**图（哪怕先 `H=1024,E=32`）。
+5. **README 更新**：补充“如何复现实验”的命令与**口径定义**（有效带宽、FLOPs 的计算方式、随机种子）。
+
+---
+
+## 常见坑位与建议
+
+* **口径统一**：报告里统一“是否计 pack+combine 两者的读写”，否则带宽数字不可比。
+* **随机负载 vs 真实负载**：微基准默认负载近似均匀；可以额外加一个 **Zipf 分布**路由来模拟偏斜（更接近真实训练早期）。
+* **正确性回归**：`combine(pack(x))≈x`（忽略溢出），`max_abs_err < 1e-3`。
+* **显存爆炸**：真专家权重时注意 `E*H*4H` 的量级，先用共享权重做系统侧，再做小尺度真权重验证趋势。
+* **计时**：用 CUDA events 包括 `synchronize()`，避免 host 端计时误差。
+* **结果固化**：所有 JSONL 加上 `ts` 与 `git SHA`（可用 `subprocess.check_output(['git','rev-parse','HEAD'])` 写入）。
+
+---
+
+如果你愿意，我可以在下一步把 **pack/combine 的 Torch vs QuACK 接口**（`moe_routing_bench/routers/{pack,combine}_{torch,quack}.py`）的骨架也写出来，并给出 `pytest` 的正确性用例。这样你就能只填内核、立即对齐到同一个基准框架。

@@ -45,3 +45,23 @@ def measure_latency_ms(fn, warmup: int = 10, iters: int = 100, sync: bool = True
     import numpy as np
 
     return float(np.mean(times)), float(np.std(times))
+
+
+BYTES_PER_SCALAR = {
+    'float16': 2,
+    'bfloat16': 2,
+    'float32': 4,
+}
+
+
+def bytes_per_token_pack_combine_strict(hidden_dim: int, top_k: int, dtype_bytes: int) -> int:
+    return (2 + 2 * top_k) * hidden_dim * dtype_bytes
+
+
+def bytes_per_token_pack_only(hidden_dim: int, top_k: int, dtype_bytes: int) -> int:
+    return (1 + top_k) * hidden_dim * dtype_bytes
+
+
+def gib_per_s(num_tokens: int, bytes_per_token_total: int, avg_ms: float) -> float:
+    total_bytes = num_tokens * bytes_per_token_total
+    return (total_bytes / (1024 ** 3)) / (avg_ms / 1000.0)
