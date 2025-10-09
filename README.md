@@ -1,5 +1,9 @@
 # moe-routing-bench
 
+## Proposal
+[Project Proposal](https://docs.google.com/document/d/1s6bXTtXZuCin6RbOFYJIVvWXMNcvPrVMaxMTPWTwwnU/edit?usp=sharing)
+
+
 ## Env Setup
 
 ```bash
@@ -14,6 +18,8 @@ pip install --upgrade pip
 pip install -e .
 
 (optional) pip3 install torch --index-url https://download.pytorch.org/whl/cu128
+
+source ./resources.sh
 ```
 
 ## Usage
