@@ -1,6 +1,0 @@
-[submodule "3rdparty/quack"]
-	path = 3rdparty/quack
-	url = https://github.com/Dao-AILab/quack.git
-[submodule "3rdparty/cutlass"]
-	path = 3rdparty/cutlass
-	url = https://github.com/NVIDIA/cutlass

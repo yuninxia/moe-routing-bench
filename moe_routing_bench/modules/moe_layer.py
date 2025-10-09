@@ -104,6 +104,23 @@ class MoEFeedForward(nn.Module):
             renorm_after_drop=self.renorm_after_drop,
         )
 
+        expected_tokens = self.num_experts * capacity
+        if packed.shape[0] != expected_tokens:
+            if packed.shape[0] < expected_tokens:
+                pad = packed.new_zeros((expected_tokens - packed.shape[0], hidden))
+                packed = torch.cat([packed, pad], dim=0)
+            else:
+                packed = packed[:expected_tokens]
+        if route.expert_counts.numel() != self.num_experts:
+            counts = route.expert_counts
+            if counts.numel() < self.num_experts:
+                pad_counts = counts.new_zeros(self.num_experts)
+                pad_counts[: counts.numel()] = counts
+                route.expert_counts = pad_counts
+            else:
+                route.expert_counts = counts[: self.num_experts]
+        route.experts = self.num_experts
+
         # reshape to [E, C, D]
         packed_view = packed.view(self.num_experts, capacity, hidden)
         expert_out = self.experts(packed_view, route.expert_counts)

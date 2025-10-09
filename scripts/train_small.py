@@ -237,6 +237,25 @@ LOG_STAT_KEYS = [
 ]
 
 
+def ffn_flops_per_token(dim: int, expand: int, top_k: int) -> float:
+    return 4.0 * expand * (dim ** 2) * max(1, top_k)
+
+
+def router_flops_per_token(dim: int, num_experts: int) -> float:
+    return 2.0 * dim * num_experts + 5.0 * num_experts
+
+
+def bytes_per_token_strict(dim: int, top_k: int, dtype: str) -> int:
+    dtype = dtype.lower()
+    if dtype == "fp32":
+        dtype_bytes = 4
+    elif dtype in ("bf16", "bfloat16", "fp16", "float16"):
+        dtype_bytes = 2
+    else:
+        raise ValueError(f"Unsupported dtype for byte count: {dtype}")
+    return int((2 + 2 * max(1, top_k)) * dim * dtype_bytes)
+
+
 def _infer_local_rank(default: int = 0) -> int:
     for key in ("LOCAL_RANK", "SLURM_LOCALID"):
         if key in os.environ:
@@ -329,10 +348,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Torch device (e.g., cuda, cuda:0, cpu)")
     parser.add_argument("--num-experts", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=2)
-    parser.add_argument("--strategy", type=str, default="softk", choices=["top1", "topk_hard", "softk"])
+    parser.add_argument("--strategy", type=str, default="softk", help="Routing strategy: top1, topk-hard, softk")
     parser.add_argument("--capacity-factor", type=float, default=1.25)
     parser.add_argument("--renorm-after-drop", action="store_true")
-    parser.add_argument("--router", type=str, default="torch_soft", choices=["torch_soft", "quack"])
+    parser.add_argument("--router", type=str, default="torch_soft", choices=["torch_soft"], help="Routing backend (Torch reference)")
     parser.add_argument("--ffn-mult", type=int, default=4)
     parser.add_argument("--load-balance-alpha", type=float, default=1e-2)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -359,6 +378,14 @@ def cosine_decay(step: int, warmup: int, total: int, base_lr: float) -> float:
 
 def main() -> None:
     args = parse_args()
+    args.strategy = args.strategy.replace('-', '_').lower()
+    valid_strategies = {"top1", "topk_hard", "softk"}
+    if args.strategy not in valid_strategies:
+        raise ValueError(f"Unsupported strategy: {args.strategy}")
+    if args.strategy == "top1":
+        args.top_k = 1
+    elif args.top_k < 1:
+        raise ValueError("top_k must be >=1")
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
@@ -446,7 +473,12 @@ def main() -> None:
                 print(f"[warn] torch.compile failed: {exc}")
 
     if distributed:
-        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True,
+        )
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -462,6 +494,10 @@ def main() -> None:
     outdir = Path(args.outdir)
     if is_main:
         outdir.mkdir(parents=True, exist_ok=True)
+        hparams = vars(args).copy()
+        hparams["world_size"] = world_size
+        with open(outdir / "hparams.json", "w", encoding="utf-8") as f:
+            json.dump(hparams, f, indent=2, ensure_ascii=False)
     if distributed:
         dist.barrier()
     log_path = outdir / "train_log.jsonl"
@@ -528,6 +564,12 @@ def main() -> None:
                 t0 = time.perf_counter()
                 tokens_per_s = tokens_this_batch * interval / max(1e-6, step_ms / 1000.0)
 
+                ffn_flops = ffn_flops_per_token(args.dim, args.ffn_mult, args.top_k)
+                router_flops = router_flops_per_token(args.dim, args.num_experts)
+                bytes_per_token = bytes_per_token_strict(args.dim, args.top_k, args.dtype)
+                eff_tflops = (ffn_flops + router_flops) * tokens_per_s / 1e12
+                bw_gibps = (bytes_per_token * tokens_per_s) / (1024 ** 3)
+
                 train_loss_avg = reduce_float(float(ce_loss.item()), device, distributed, world_size)
                 log_stats = gather_log_stats(stats_detached, device, distributed, world_size)
 
@@ -540,16 +582,25 @@ def main() -> None:
                     "bpc": eval_stats["bpc"],
                     "avg_step_ms": step_ms,
                     "tokens_per_s": tokens_per_s,
+                    "tokens_per_s_per_rank": tokens_per_s / max(1, world_size),
                     "drop_rate": log_stats["drop_rate"],
                     "token_drop_rate": log_stats["token_drop_rate"],
                     "load_cv": log_stats["load_cv"],
                     "used_capacity": log_stats["used_capacity"],
                     "aux_loss": log_stats["aux_loss"],
                     "gate_entropy": log_stats["gate_entropy"],
+                    "ffn_flops_per_token": ffn_flops,
+                    "router_flops_per_token": router_flops,
+                    "eff_tflops": eff_tflops,
+                    "bw_GiBps_strict": bw_gibps,
+                    "bytes_per_token_strict": bytes_per_token,
                     "num_experts": args.num_experts,
                     "top_k": args.top_k,
                     "strategy": args.strategy,
+                    "routing_strategy": args.strategy.replace('_', '-'),
+                    "router_backend": args.router,
                     "capacity_factor": args.capacity_factor,
+                    "world_size": world_size,
                     "tokens_seen": tokens_seen,
                 }
                 if is_main:

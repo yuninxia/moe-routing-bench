@@ -3,13 +3,18 @@
 ## Env Setup
 
 ```bash
-pip3 install nvidia-cutlass-dsl
-pip3 install torch --index-url https://download.pytorch.org/whl/cu128
-```
+# For L40S
+module purge
+module load GCCcore/12.3.0
+module load Python/3.11.3
 
-## Reference
-- https://veitner.bearblog.dev/bridging-math-and-code-cute-layout-algebra-in-cutedsl/
-- https://veitner.bearblog.dev/an-applied-introduction-to-cutedsl/
+python -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+
+(optional) pip3 install torch --index-url https://download.pytorch.org/whl/cu128
+```
 
 ## Usage
 
@@ -21,9 +26,7 @@ pip install -e .
 ### Quick benches
 ```bash
 python -m moe_routing_bench.cli bench-topk --impl torch --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 200
-python -m moe_routing_bench.cli bench-topk --impl quack --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 200
 python -m moe_routing_bench.cli bench-routing --impl-topk torch --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 100
-python -m moe_routing_bench.cli bench-routing --impl-topk quack --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 100
 python scripts/bench_pack.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
 ```
 
@@ -60,3 +63,37 @@ python scripts/train_small.py --max-steps 200 --eval-interval 50 --device cuda
 python scripts/export_tinystories.py --split train --out data/tinystories_train.txt
 python scripts/export_tinystories.py --split validation --out data/tinystories_val.txt
 ```
+
+### Distributed & Routing sweeps
+```bash
+# 4×GPU DDP run (bf16, batch 128 / GPU)
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
+  scripts/train_small.py --distributed --device cuda \
+  --data data/tinystories_train.txt --seq-len 512 --batch-size 128 \
+  --max-steps 2000 --eval-interval 200 --lr 1.2e-3 --warmup-steps 50 \
+  --outdir runs/tinystories_ddp_bs_128
+
+# Strategy × capacity sweep (pure PyTorch)
+CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/sweep_routing_train.py \
+  --data data/tinystories_train.txt --seq-len 512 --batch-per-gpu 128 \
+  --num-experts-list 64,128 --router-list top1,topk-hard,softk \
+  --topk-list 1,2,4 --capacity-factors 1.0,1.25,1.5 \
+  --seeds 17,18,19 --max-steps 1000 --eval-interval 200 \
+  --outdir-root runs/routing_sweep
+
+# Summarise & plot Pareto frontier
+python scripts/summarize_runs.py --runs 'runs/routing_sweep/*' \
+  --out results/routing_sweep_summary.csv
+python scripts/plot_frontier.py \
+  --summary results/routing_sweep_summary.csv \
+  --filter-E 128 --filter-dim 256 \
+  --out results/routing_frontier.png
+
+# Plot step-wise metrics for a single run
+python scripts/plot_training_curve.py \
+  --log runs/tinystories_ddp_bs_128/train_log.jsonl \
+  --metrics train_loss,val_loss,ppl \
+  --out results/tinystories_ddp_bs_128_curve.png
+```
+
+Each training run writes `train_log.jsonl` (tokens/s, drop-rate, load_cv, gate entropy, FLOPs, bandwidth, etc.) and `hparams.json` for reproducibility and visualisation.
