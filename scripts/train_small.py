@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal end-to-end MoE training script (single GPU, character LM by default)."""
+"""Minimal end-to-end MoE training script (single GPU or DDP)."""
 from __future__ import annotations
 
 import argparse
@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 
 from moe_routing_bench.modules import MoEFeedForward
 
@@ -66,7 +69,16 @@ class CharDataset(Dataset):
         return x, y
 
 
-def build_dataloaders(path: Optional[str], seq_len: int, batch_size: int, num_workers: int = 0):
+def build_dataloaders(
+    path: Optional[str],
+    seq_len: int,
+    batch_size: int,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    distributed: bool = False,
+    world_size: int = 1,
+    rank: int = 0,
+):
     text = _load_text(path)
     split = int(len(text) * 0.9)
     train_text, val_text = text[:split], text[split:]
@@ -83,23 +95,38 @@ def build_dataloaders(path: Optional[str], seq_len: int, batch_size: int, num_wo
         y = torch.stack(ys)
         return x, y
 
+    train_sampler = (
+        DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+        if distributed
+        else None
+    )
+    val_sampler = (
+        DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
+        if distributed
+        else None
+    )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=not distributed,
+        sampler=train_sampler,
         num_workers=num_workers,
         drop_last=True,
         collate_fn=collate,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=num_workers,
-        drop_last=True,
+        drop_last=False,
         collate_fn=collate,
+        pin_memory=pin_memory,
     )
-    return train_loader, val_loader, vocab
+    return train_loader, val_loader, vocab, train_sampler, val_sampler
 
 
 # -----------------------------------------------------------------------------
@@ -200,11 +227,68 @@ def aggregate_stats(stats_list: List[Dict[str, torch.Tensor]]) -> Dict[str, torc
     return result
 
 
+LOG_STAT_KEYS = [
+    "drop_rate",
+    "token_drop_rate",
+    "load_cv",
+    "used_capacity",
+    "aux_loss",
+    "gate_entropy",
+]
+
+
+def _infer_local_rank(default: int = 0) -> int:
+    for key in ("LOCAL_RANK", "SLURM_LOCALID"):
+        if key in os.environ:
+            return int(os.environ[key])
+    return default
+
+
+def reduce_float(value: float, device: torch.device, distributed: bool, world_size: int) -> float:
+    tensor = torch.tensor(float(value), device=device, dtype=torch.float64)
+    if distributed:
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        tensor /= world_size
+    return float(tensor.item())
+
+
+def gather_log_stats(
+    stats: Dict[str, torch.Tensor | float],
+    device: torch.device,
+    distributed: bool,
+    world_size: int,
+) -> Dict[str, float]:
+    result: Dict[str, float] = {}
+    for key in LOG_STAT_KEYS:
+        val = stats.get(key)
+        if isinstance(val, torch.Tensor):
+            val = val.detach()
+            if val.numel() > 1:
+                val = val.mean()
+            scalar = float(val.item())
+        elif val is None:
+            scalar = 0.0
+        else:
+            scalar = float(val)
+        tensor = torch.tensor(scalar, device=device, dtype=torch.float64)
+        if distributed:
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= world_size
+        result[key] = float(tensor.item())
+    return result
+
+
 # -----------------------------------------------------------------------------
 # Training utilities
 
 
-def eval_model(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def eval_model(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    distributed: bool = False,
+    world_size: int = 1,
+) -> Dict[str, float]:
     model.eval()
     total_loss = 0.0
     tokens = 0
@@ -215,7 +299,14 @@ def eval_model(model: nn.Module, loader: DataLoader, device: torch.device) -> Di
             _, loss, _ = model(x, y)
             total_loss += float(loss.item()) * x.numel()
             tokens += x.numel()
-    avg_loss = total_loss / max(1, tokens)
+    total_loss_t = torch.tensor(total_loss, device=device, dtype=torch.float64)
+    tokens_t = torch.tensor(tokens, device=device, dtype=torch.float64)
+    if distributed:
+        dist.all_reduce(total_loss_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(tokens_t, op=dist.ReduceOp.SUM)
+    total_loss_val = float(total_loss_t.item())
+    tokens_val = max(1.0, float(tokens_t.item()))
+    avg_loss = total_loss_val / tokens_val
     ppl = math.exp(min(20, avg_loss))
     bpc = avg_loss / math.log(2)
     return {"val_loss": avg_loss, "ppl": ppl, "bpc": bpc}
@@ -253,6 +344,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", type=str, default="bf16", choices=["fp32", "fp16", "bf16"])
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--distributed", action="store_true", help="Enable DistributedDataParallel")
+    parser.add_argument("--dist-backend", type=str, default="nccl", help="torch.distributed backend when using --distributed")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers per rank")
     return parser.parse_args()
 
 
@@ -268,14 +362,60 @@ def main() -> None:
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
-    if args.device is None:
-        target = "cuda" if torch.cuda.is_available() else "cpu"
+    distributed = args.distributed
+    world_size = 1
+    rank = 0
+    local_rank = 0
+
+    if distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed training requires CUDA")
+        if not dist.is_available():
+            raise RuntimeError("torch.distributed is not available")
+        local_rank = _infer_local_rank()
+        torch.cuda.set_device(local_rank)
+        env_rank = int(os.environ.get("RANK", rank))
+        env_world_size = int(os.environ.get("WORLD_SIZE", world_size))
+        if not dist.is_initialized():
+            init_kwargs = dict(
+                backend=args.dist_backend,
+                rank=env_rank,
+                world_size=env_world_size,
+            )
+            if torch.cuda.is_available():
+                init_kwargs["device_id"] = local_rank
+            dist.init_process_group(**init_kwargs)
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        device = torch.device("cuda", local_rank)
     else:
-        target = args.device
-    device = torch.device(target)
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but not available")
-    train_loader, val_loader, vocab = build_dataloaders(args.data, args.seq_len, args.batch_size)
+        if args.device is None:
+            target = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            target = args.device
+        device = torch.device(target)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but not available")
+
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
+
+    is_main = (rank == 0) if distributed else True
+    pin_memory = device.type == "cuda"
+
+    train_loader, val_loader, vocab, train_sampler, val_sampler = build_dataloaders(
+        args.data,
+        args.seq_len,
+        args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=pin_memory,
+        distributed=distributed,
+        world_size=world_size,
+        rank=rank,
+    )
+
+    if distributed:
+        dist.barrier()
 
     moe_kwargs = dict(
         num_experts=args.num_experts,
@@ -302,7 +442,11 @@ def main() -> None:
         try:
             model = torch.compile(model)  # type: ignore
         except Exception as exc:
-            print(f"[warn] torch.compile failed: {exc}")
+            if is_main:
+                print(f"[warn] torch.compile failed: {exc}")
+
+    if distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -313,17 +457,23 @@ def main() -> None:
     elif dtype == "bf16":
         autocast_dtype = torch.bfloat16
     use_autocast = autocast_dtype is not None and device.type == "cuda"
-    scaler = torch.amp.GradScaler(enabled=autocast_dtype == torch.float16)
+    scaler = torch.amp.GradScaler(enabled=autocast_dtype == torch.float16 and device.type == "cuda")
 
     outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    if is_main:
+        outdir.mkdir(parents=True, exist_ok=True)
+    if distributed:
+        dist.barrier()
     log_path = outdir / "train_log.jsonl"
+
     best_ppl = float("inf")
     tokens_seen = 0
     step = 0
-
     t0 = time.perf_counter()
-    for epoch in range(10 ** 6):  # run until step reaches max_steps
+
+    for epoch in range(10 ** 6):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         for batch in train_loader:
             step += 1
             model.train()
@@ -334,11 +484,23 @@ def main() -> None:
             x, y = batch
             x = x.to(device)
             y = y.to(device)
-            tokens_seen += x.numel()
+
+            tokens_this_batch = x.numel()
+            tokens_tensor = torch.tensor(tokens_this_batch, device=device, dtype=torch.float64)
+            if distributed:
+                dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
+            tokens_this_batch = int(tokens_tensor.item())
+            tokens_seen += tokens_this_batch
 
             with torch.autocast(device.type, dtype=autocast_dtype, enabled=use_autocast):
                 logits, ce_loss, stats = model(x, y)
-                loss = ce_loss + stats.get("aux_loss", torch.tensor(0.0, device=device))
+                aux_loss = stats.get("aux_loss", torch.tensor(0.0, device=device))
+                loss = ce_loss + aux_loss
+
+            stats_detached = {
+                k: (v.detach() if isinstance(v, torch.Tensor) else v)
+                for k, v in stats.items()
+            }
 
             scaler.scale(loss).backward()
             if args.grad_clip > 0:
@@ -348,49 +510,68 @@ def main() -> None:
             scaler.update()
             optim.zero_grad(set_to_none=True)
 
-            if step % args.eval_interval == 0 or step == args.max_steps:
-                torch.cuda.synchronize() if device.type == "cuda" else None
-                eval_stats = eval_model(model, val_loader, device)
-                step_ms = (time.perf_counter() - t0) * 1000.0 / args.eval_interval
+            should_eval = (args.eval_interval > 0 and step % args.eval_interval == 0) or step == args.max_steps
+            if should_eval:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                if val_sampler is not None:
+                    val_sampler.set_epoch(step)
+                eval_stats = eval_model(
+                    model,
+                    val_loader,
+                    device,
+                    distributed=distributed,
+                    world_size=world_size,
+                )
+                interval = max(1, args.eval_interval)
+                step_ms = (time.perf_counter() - t0) * 1000.0 / interval
                 t0 = time.perf_counter()
-                tps = (args.batch_size * args.seq_len * args.eval_interval) / (step_ms / 1000.0)
+                tokens_per_s = tokens_this_batch * interval / max(1e-6, step_ms / 1000.0)
+
+                train_loss_avg = reduce_float(float(ce_loss.item()), device, distributed, world_size)
+                log_stats = gather_log_stats(stats_detached, device, distributed, world_size)
 
                 row = {
                     "step": step,
                     "lr": lr,
-                    "train_loss": float(ce_loss.item()),
+                    "train_loss": train_loss_avg,
                     "val_loss": eval_stats["val_loss"],
                     "ppl": eval_stats["ppl"],
                     "bpc": eval_stats["bpc"],
                     "avg_step_ms": step_ms,
-                    "tokens_per_s": tps,
-                    "drop_rate": float(stats.get("drop_rate", torch.tensor(0.0)).item()),
-                    "token_drop_rate": float(stats.get("token_drop_rate", torch.tensor(0.0)).item()),
-                    "load_cv": float(stats.get("load_cv", torch.tensor(0.0)).item()),
-                    "used_capacity": float(stats.get("used_capacity", torch.tensor(0.0)).item()),
-                    "aux_loss": float(stats.get("aux_loss", torch.tensor(0.0)).item()),
-                    "gate_entropy": float(stats.get("gate_entropy", torch.tensor(0.0)).item()),
+                    "tokens_per_s": tokens_per_s,
+                    "drop_rate": log_stats["drop_rate"],
+                    "token_drop_rate": log_stats["token_drop_rate"],
+                    "load_cv": log_stats["load_cv"],
+                    "used_capacity": log_stats["used_capacity"],
+                    "aux_loss": log_stats["aux_loss"],
+                    "gate_entropy": log_stats["gate_entropy"],
                     "num_experts": args.num_experts,
                     "top_k": args.top_k,
                     "strategy": args.strategy,
                     "capacity_factor": args.capacity_factor,
                     "tokens_seen": tokens_seen,
                 }
-                print(json.dumps(row, ensure_ascii=False))
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row) + "\n")
-
+                if is_main:
+                    print(json.dumps(row, ensure_ascii=False))
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(row) + "\n")
                 if eval_stats["ppl"] < best_ppl:
                     best_ppl = eval_stats["ppl"]
-                    ckpt_path = outdir / "best.pt"
-                    torch.save({
-                        "model": model.state_dict(),
-                        "vocab_size": vocab.size,
-                        "vocab_itos": vocab.itos,
-                        "config": vars(args),
-                        "step": step,
-                        "ppl": best_ppl,
-                    }, ckpt_path)
+                    if is_main:
+                        state_dict = model.module.state_dict() if distributed else model.state_dict()
+                        ckpt_path = outdir / "best.pt"
+                        torch.save(
+                            {
+                                "model": state_dict,
+                                "vocab_size": vocab.size,
+                                "vocab_itos": vocab.itos,
+                                "config": vars(args),
+                                "step": step,
+                                "ppl": best_ppl,
+                            },
+                            ckpt_path,
+                        )
 
             if step >= args.max_steps:
                 break
@@ -398,7 +579,12 @@ def main() -> None:
             break
 
     final = {"done": True, "steps": step, "tokens_seen": tokens_seen}
-    print(json.dumps(final, ensure_ascii=False))
+    if distributed:
+        dist.barrier()
+    if is_main:
+        print(json.dumps(final, ensure_ascii=False))
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ dependencies = [
   "torch>=2.3",
   "nvidia-cutlass-dsl",
   "numpy>=1.24",
+  "datasets",
+  "pytest",
 ]
 
 [tool.setuptools.packages.find]
