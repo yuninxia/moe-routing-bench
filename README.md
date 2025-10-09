@@ -49,3 +49,14 @@ python scripts/bench_capacity.py --num-tokens 16384 --hidden-dim 4096 --num-expe
 - `load_cv`: coefficient of variation of per-expert token counts.
 - `avg_drop_rate`: fraction of assignments dropped when enforcing capacity.
 - All benchmarks fix `seed=17`; adjust as needed.
+
+### Training
+```bash
+python scripts/train_small.py --max-steps 200 --eval-interval 50 --device cuda
+```
+
+```bash
+# Export TinyStories splits to text (requires `pip install datasets`)
+python scripts/export_tinystories.py --split train --out data/tinystories_train.txt
+python scripts/export_tinystories.py --split validation --out data/tinystories_val.txt
+```

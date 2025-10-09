@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import math
+from typing import Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+
+from moe_routing_bench.routers.base import PackCombine, RouteInfo, get_router
+from moe_routing_bench.topk_impls import softk_indices_and_gates, top1_indices
+
+from .experts import GroupFFNExperts
+
+Tensor = torch.Tensor
+
+
+class MoEFeedForward(nn.Module):
+    """Mixture-of-Experts feed-forward block with pluggable routing backend."""
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_experts: int,
+        top_k: int,
+        ffn_mult: int = 4,
+        router_name: str = "torch_soft",
+        strategy: str = "softk",
+        capacity_factor: float = 1.25,
+        renorm_after_drop: bool = True,
+        activation: str = "gelu",
+        load_balance_alpha: float = 1e-2,
+        bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.router_name = router_name
+        self.strategy = strategy
+        self.capacity_factor = capacity_factor
+        self.renorm_after_drop = renorm_after_drop
+        self.load_balance_alpha = load_balance_alpha
+
+        self.router_linear = nn.Linear(hidden_dim, num_experts, bias=True)
+        nn.init.normal_(self.router_linear.weight, mean=0.0, std=hidden_dim ** -0.5)
+        nn.init.zeros_(self.router_linear.bias)
+
+        self.experts = GroupFFNExperts(
+            num_experts=num_experts,
+            d_model=hidden_dim,
+            ffn_mult=ffn_mult,
+            activation=activation,
+            bias=bias,
+        )
+
+    def _get_router(self) -> PackCombine:
+        return get_router(self.router_name)
+
+    def _capacity(self, tokens: int, k_eff: int) -> int:
+        expected = tokens * k_eff / max(1, self.num_experts)
+        cap = max(1, int(math.ceil(self.capacity_factor * expected)))
+        return cap
+
+    def _route(self, logits: Tensor) -> Tuple[torch.LongTensor, Optional[Tensor], int]:
+        if self.strategy == "top1":
+            indices = top1_indices(logits)
+            gates = None
+            k_eff = 1
+        elif self.strategy == "topk_hard":
+            indices = torch.topk(logits, self.top_k, dim=-1).indices
+            gates = None
+            k_eff = self.top_k
+        elif self.strategy == "softk":
+            indices, gates = softk_indices_and_gates(logits, self.top_k, temperature=1.0, normalize="softmax")
+            gates = gates.to(logits.dtype)
+            k_eff = self.top_k
+        else:
+            raise ValueError(f"Unknown routing strategy: {self.strategy}")
+        return indices, gates, k_eff
+
+    def forward(self, x: Tensor) -> Tuple[Tensor, Dict[str, torch.Tensor]]:
+        """Forward pass.
+
+        Args:
+            x: tensor of shape [batch, seq, hidden].
+        Returns:
+            output tensor and a dict of logging stats (including aux loss).
+        """
+        orig_shape = x.shape
+        tokens = x.shape[0] * x.shape[1]
+        hidden = x.shape[-1]
+        x_2d = x.reshape(tokens, hidden)
+
+        logits = self.router_linear(x_2d)
+        topk_idx, gates, k_eff = self._route(logits)
+        capacity = self._capacity(tokens, k_eff)
+
+        router = self._get_router()
+        packed, route = router.pack(
+            x_2d,
+            topk_idx,
+            gates,
+            capacity=capacity,
+            renorm_after_drop=self.renorm_after_drop,
+        )
+
+        # reshape to [E, C, D]
+        packed_view = packed.view(self.num_experts, capacity, hidden)
+        expert_out = self.experts(packed_view, route.expert_counts)
+        expert_flat = expert_out.view(self.num_experts * capacity, hidden)
+        combined = router.combine(expert_flat, route, out_tokens=tokens)
+        out = combined.view(*orig_shape)
+
+        stats = self._compute_stats(route, capacity, tokens, k_eff, logits, gates)
+        return out, stats
+
+    def _compute_stats(
+        self,
+        route: RouteInfo,
+        capacity: int,
+        tokens: int,
+        k_eff: int,
+        logits: Tensor,
+        gates: Optional[Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        total_assign = max(1, tokens * k_eff)
+        kept = route.kept_mask.sum().item()
+        avg_drop = 1.0 - kept / total_assign
+        token_drop = float((~route.kept_mask).all(dim=1).float().mean().item()) if tokens > 0 else 0.0
+        counts = route.expert_counts.float()
+        load_mean = counts.mean()
+        load_std = counts.std(unbiased=False)
+        load_cv = load_std / (load_mean + 1e-9)
+        used_capacity = counts.max() / max(1, capacity)
+
+        loss_bal = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+        if counts.sum() > 0:
+            norm_counts = counts / counts.sum()
+            target = 1.0 / self.num_experts
+            loss_bal = ((norm_counts - target) ** 2).sum()
+
+        aux_loss = self.load_balance_alpha * loss_bal
+
+        gate_entropy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+        if gates is not None:
+            gate_entropy = -(gates * (gates.clamp_min(1e-9).log())).sum(dim=-1).mean()
+
+        return {
+            "drop_rate": torch.tensor(avg_drop, device=logits.device),
+            "token_drop_rate": torch.tensor(token_drop, device=logits.device),
+            "load_cv": load_cv.to(logits.device),
+            "used_capacity": used_capacity.to(logits.device),
+            "aux_loss": aux_loss,
+            "gate_entropy": gate_entropy,
+            "expert_counts": counts,
+        }
