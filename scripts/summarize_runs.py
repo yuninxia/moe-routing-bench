@@ -80,18 +80,29 @@ def summarize_run(run_dir: str) -> Dict[str, Any] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize MoE routing sweeps")
-    parser.add_argument("--runs", type=str, default="runs/routing_sweep/*")
+    parser.add_argument(
+        "--runs",
+        type=str,
+        nargs="+",
+        default=["runs/routing_sweep/*"],
+        help="One or more glob patterns for run directories",
+    )
     parser.add_argument("--out", type=str, default="results/routing_sweep_summary.csv")
     args = parser.parse_args()
 
+    patterns: List[str] = args.runs
+    all_dirs: List[str] = []
+    for pattern in patterns:
+        all_dirs.extend(glob.glob(pattern))
+
     rows: List[Dict[str, Any]] = []
-    for run_dir in sorted(glob.glob(args.runs)):
+    for run_dir in sorted(set(all_dirs)):
         summary = summarize_run(run_dir)
         if summary is not None:
             rows.append(summary)
 
     if not rows:
-        print("No runs found for pattern", args.runs)
+        print("No runs found for patterns", patterns)
         return
 
     df = pd.DataFrame(rows)
