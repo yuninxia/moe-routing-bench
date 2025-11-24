@@ -12,6 +12,8 @@ if [[ ! -x "$PY" ]]; then
 fi
 
 # Common hyperparameters for all runs (tweak here if needed).
+MAX_STEPS=${MAX_STEPS:-600}
+EVAL_INTERVAL=${EVAL_INTERVAL:-100}
 COMMON_ARGS=(
   --data "${ROOT}/data/tinystories_train.txt"
   --seq-len 256
@@ -23,8 +25,8 @@ COMMON_ARGS=(
   --ffn-mult 4
   --lr 3e-4
   --warmup-steps 50
-  --max-steps 600
-  --eval-interval 100
+  --max-steps "${MAX_STEPS}"
+  --eval-interval "${EVAL_INTERVAL}"
   --dtype bf16
   --device cuda
   --seed 17

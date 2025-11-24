@@ -348,7 +348,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Torch device (e.g., cuda, cuda:0, cpu)")
     parser.add_argument("--num-experts", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=2)
-    parser.add_argument("--strategy", type=str, default="softk", help="Routing strategy: top1, topk-hard, softk")
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default="softk",
+        help="Routing strategy: top1, topk-hard, softk, expert-choice, hash",
+    )
     parser.add_argument("--capacity-factor", type=float, default=1.25)
     parser.add_argument("--renorm-after-drop", action="store_true")
     parser.add_argument("--router", type=str, default="torch_soft", choices=["torch_soft"], help="Routing backend (Torch reference)")
@@ -379,7 +384,7 @@ def cosine_decay(step: int, warmup: int, total: int, base_lr: float) -> float:
 def main() -> None:
     args = parse_args()
     args.strategy = args.strategy.replace('-', '_').lower()
-    valid_strategies = {"top1", "topk_hard", "softk"}
+    valid_strategies = {"top1", "topk_hard", "softk", "expert_choice", "hash"}
     if args.strategy not in valid_strategies:
         raise ValueError(f"Unsupported strategy: {args.strategy}")
     if args.strategy == "top1":

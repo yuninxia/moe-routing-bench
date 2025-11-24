@@ -74,6 +74,12 @@ class MoEFeedForward(nn.Module):
             indices, gates = softk_indices_and_gates(logits, self.top_k, temperature=1.0, normalize="softmax")
             gates = gates.to(logits.dtype)
             k_eff = self.top_k
+        elif self.strategy == "expert_choice":
+            indices, gates = self._route_expert_choice(logits)
+            k_eff = self.top_k
+        elif self.strategy == "hash":
+            indices, gates = self._route_hash(logits)
+            k_eff = self.top_k
         else:
             raise ValueError(f"Unknown routing strategy: {self.strategy}")
         return indices, gates, k_eff
@@ -130,6 +136,76 @@ class MoEFeedForward(nn.Module):
 
         stats = self._compute_stats(route, capacity, tokens, k_eff, logits, gates)
         return out, stats
+
+    def _route_expert_choice(self, logits: Tensor) -> Tuple[torch.LongTensor, Tensor]:
+        """Simplified expert-choice routing (vectorized).
+
+        Experts pick top tokens; tokens then keep up to top_k experts ranked by logits.
+        Falls back to standard token->expert topk if not enough valid experts.
+        """
+
+        tokens, num_experts = logits.shape
+        device = logits.device
+        dtype = logits.dtype
+        k = self.top_k
+
+        if tokens == 0 or num_experts == 0:
+            empty_idx = torch.empty(tokens, k, dtype=torch.long, device=device)
+            empty_gates = torch.empty(tokens, k, dtype=dtype, device=device)
+            return empty_idx, empty_gates
+
+        expected = tokens * k / max(1, num_experts)
+        tokens_per_expert = max(1, int(math.ceil(self.capacity_factor * expected)))
+        tokens_per_expert = min(tokens_per_expert, tokens)
+        # Clamp to keep the per-expert topk tractable on small models.
+        tokens_per_expert = min(tokens_per_expert, 64)
+
+        # Expert-first selection mask: top tokens per expert (shape [E, T] -> mask [T, E])
+        scores_T = logits.transpose(0, 1)
+        _, top_tok = torch.topk(scores_T, k=tokens_per_expert, dim=1)
+        mask = torch.zeros_like(scores_T, dtype=torch.bool)
+        mask.scatter_(1, top_tok, True)
+        mask_token_expert = mask.transpose(0, 1)  # [T, E]
+
+        masked_logits = logits.masked_fill(~mask_token_expert, float("-inf"))
+        vals, idx = torch.topk(masked_logits, k=min(k, num_experts), dim=-1)
+
+        # Fallback for rows with no valid experts selected
+        mask_any = mask_token_expert.any(dim=1, keepdim=True)  # [T,1] bool
+        if not mask_any.all():
+            std_vals, std_idx = torch.topk(logits, k=min(k, num_experts), dim=-1)
+            vals = torch.where(mask_any, vals, std_vals)
+            idx = torch.where(mask_any, idx, std_idx)
+
+        gates = torch.softmax(vals, dim=-1).to(dtype)
+        return idx, gates
+
+    def _route_hash(self, logits: Tensor) -> Tuple[torch.LongTensor, Tensor]:
+        """Content-agnostic hash routing with uniform gates."""
+
+        tokens, num_experts = logits.shape
+        device = logits.device
+        dtype = logits.dtype
+        k = self.top_k
+
+        if tokens == 0 or num_experts == 0:
+            empty_idx = torch.empty(tokens, k, dtype=torch.long, device=device)
+            empty_gates = torch.empty(tokens, k, dtype=dtype, device=device)
+            return empty_idx, empty_gates
+
+        token_ids = torch.arange(tokens, device=device, dtype=torch.long)
+        A = 1315423911
+        B = 2654435761
+        C = 97
+
+        base = (token_ids * A + B) % num_experts
+        indices = torch.empty(tokens, k, dtype=torch.long, device=device)
+        indices[:, 0] = base
+        for j in range(1, k):
+            indices[:, j] = (base + j * C) % num_experts
+
+        gates = torch.full((tokens, k), 1.0 / float(k), dtype=dtype, device=device)
+        return indices, gates
 
     def _compute_stats(
         self,
