@@ -208,3 +208,5 @@ __marimo__/
 
 # Training outputs
 runs/
+
+3rdparty/
