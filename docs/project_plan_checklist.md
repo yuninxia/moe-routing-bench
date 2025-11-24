@@ -12,7 +12,7 @@
   - [x] Add unit tests similar to `tests/test_softk_routing.py` to validate `hash` and `expert_choice` pack/combine correctness.
 - [x] Run Experiment C (new routers): compare `top1/topk-hard/softk/hash/expert_choice` at fixed hyperparams; plot throughput vs PPL frontier and overlay curves. Commands: `bash scripts/run_experiment_c.sh` then `bash scripts/summarize_plot_experiment_c.sh`.
 - [x] Capture figures/artifacts under `results/` with clear filenames (frontier, training_curve, capacity_drop, optional CF_vs_PPL). Current: `results/experiment_a_frontier.png`, `results/experiment_a_overlay.png`, `results/capacity_drop_rate_multi.png`, `results/capacity_tokens_per_s_multi.png`, `results/expC_frontier.png`, `results/expC_frontier_tflops.png`.
-- [ ] Analyze findings: trade-offs across routing strategies, CF impact on drop_rate/load balance/throughput/PPL; draft 5–10 key takeaways in `docs/report.md` for later use in report/slides.
+- [x] Analyze findings: trade-offs across routing strategies, CF impact on drop_rate/load balance/throughput/PPL; draft 5–10 key takeaways in `docs/report.md` for later use in report/slides.
 - [ ] Draft report (≥6 pages, English, ICML/NeurIPS template acceptable): Introduction; Related Work (Switch/Soft-MoE/Chain-of-Experts/PERFT); Methods (TinyMoEModel, MoEFeedForward, metrics); Experiments A/B; Discussion toward routed PEFT and vLLM MoE+LoRA; Conclusion/Future work.
 - [ ] Prepare slides (8–12 pages): motivation; related-work map; MoE Routing Bench overview; Experiment A frontier + training curve; Experiment B capacity plot; routed PEFT/vLLM MoE+LoRA concept slide; takeaways.
 - [ ] Update README and `docs/report.md` with reproduction commands for chosen runs/plots and brief storyline/results summary.

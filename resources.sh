@@ -8,6 +8,7 @@ GPU="${GPU:-lovelace}"                      # GPU arch token in GRES (L40S -> "l
 PARTS="${PARTS:-long commons scavenge debug}"  # partitions to inspect
 CPT="${CPT:-0}"                             # optional min Idle CPUs per node (0 = ignore)
 SHOW_UPTIME="${SHOW_UPTIME:-0}"             # 1 to print uptime table (off by default)
+SHOW_QUEUE="${SHOW_QUEUE:-1}"               # 1 to print queue summary (pending/running), 0 to skip
 
 for P in $PARTS; do
   # MaxTime for this partition
@@ -78,6 +79,7 @@ for P in $PARTS; do
         if (free>0)  free_sum += free
         idle = (node in cpu_idle) ? cpu_idle[node] : 0
         if (free>=need && (cpt<=0 || idle>=cpt)) { ok++; list = list node " " }
+        if (free>0) { partial++; plist = plist node "(" free "/" total "g) " }
       }
       END{
         if(!nodes){
@@ -86,9 +88,30 @@ for P in $PARTS; do
         }
         print "summary: nodes=" nodes "  ready(>=" need ")=" ok \
               "  free_gpus=" free_sum "  ready_nodes=" (ok?list:"-")
+        if (partial>0) {
+          print "partial free (free/total gpus): " plist
+        }
       }' 3< <(sinfo -h -N -p "$P" -o "%N|%C")
   else
     echo "summary: nodes=0  ready(>=$NEED)=0  free_gpus=0  ready_nodes=-"
+  fi
+
+  # Queue summary (pending/running counts + top pending jobs)
+  if [[ "$SHOW_QUEUE" -eq 1 ]]; then
+    echo "queue:"
+    # Pull once and reuse
+    squeue -h -p "$P" -o "%i %u %T %M %R %b" 2>/dev/null \
+      | awk '
+        {id=$1; user=$2; st=$3; tim=$4; reason=$5; gres=$6; cnt[st]++; if(st=="PD"){pd[pd_n++] = id " " user " " tim " " reason " " gres}}
+        END{
+          run = cnt["R"]+0; pd = cnt["PD"]+0
+          other = 0
+          for (s in cnt) if (s!="R" && s!="PD") other += cnt[s]
+          printf "  running=%d  pending=%d  other=%d\n", run, pd, other
+          print "  top pending (jobid user time reason gres):"
+          max = (pd_n < 5 ? pd_n : 5)
+          for (i=0; i<max; i++) printf "    %s\n", pd[i]
+        }'
   fi
 
   echo
