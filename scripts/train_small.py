@@ -69,6 +69,22 @@ class CharDataset(Dataset):
         return x, y
 
 
+class SubwordDataset(Dataset):
+    """Dataset using HuggingFace BPE tokenizer (e.g., GPT-Neo)."""
+
+    def __init__(self, token_ids: torch.Tensor, seq_len: int) -> None:
+        self.seq_len = seq_len
+        self.data = token_ids
+
+    def __len__(self) -> int:
+        return max(0, self.data.size(0) - self.seq_len)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self.data[idx : idx + self.seq_len]
+        y = self.data[idx + 1 : idx + 1 + self.seq_len]
+        return x, y
+
+
 def build_dataloaders(
     path: Optional[str],
     seq_len: int,
@@ -78,16 +94,55 @@ def build_dataloaders(
     distributed: bool = False,
     world_size: int = 1,
     rank: int = 0,
+    tokenizer_name: Optional[str] = None,
 ):
+    """
+    Build train/val dataloaders.
+
+    Args:
+        tokenizer_name: If provided, use HuggingFace tokenizer (e.g., "EleutherAI/gpt-neo-125M")
+                       for subword tokenization. Otherwise, use character-level.
+    """
     text = _load_text(path)
     split = int(len(text) * 0.9)
     train_text, val_text = text[:split], text[split:]
 
-    chars = sorted(set(text))
-    vocab = Vocab(stoi={c: i for i, c in enumerate(chars)}, itos=list(chars))
+    if tokenizer_name is not None:
+        # Subword tokenization using HuggingFace
+        try:
+            from transformers import AutoTokenizer
+        except ImportError:
+            raise ImportError("Install transformers: pip install transformers")
 
-    train_ds = CharDataset(train_text, seq_len, vocab)
-    val_ds = CharDataset(val_text, seq_len, vocab)
+        hf_tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        if hf_tokenizer.pad_token is None:
+            hf_tokenizer.pad_token = hf_tokenizer.eos_token
+
+        train_ids = hf_tokenizer.encode(train_text, add_special_tokens=False)
+        val_ids = hf_tokenizer.encode(val_text, add_special_tokens=False)
+
+        train_ds = SubwordDataset(torch.tensor(train_ids, dtype=torch.long), seq_len)
+        val_ds = SubwordDataset(torch.tensor(val_ids, dtype=torch.long), seq_len)
+
+        # Create a simple Vocab-like object for compatibility
+        class SubwordVocab:
+            def __init__(self, vocab_size: int):
+                self._vocab_size = vocab_size
+                # Use integer string placeholders for compatibility with checkpoint saving.
+                self.itos = [str(i) for i in range(vocab_size)]
+
+            @property
+            def size(self) -> int:
+                return self._vocab_size
+
+        vocab = SubwordVocab(hf_tokenizer.vocab_size)
+    else:
+        # Character-level tokenization (original behavior)
+        chars = sorted(set(text))
+        vocab = Vocab(stoi={c: i for i, c in enumerate(chars)}, itos=list(chars))
+
+        train_ds = CharDataset(train_text, seq_len, vocab)
+        val_ds = CharDataset(val_text, seq_len, vocab)
 
     def collate(batch):
         xs, ys = zip(*batch)
@@ -371,6 +426,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distributed", action="store_true", help="Enable DistributedDataParallel")
     parser.add_argument("--dist-backend", type=str, default="nccl", help="torch.distributed backend when using --distributed")
     parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers per rank")
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        default=None,
+        help="HuggingFace tokenizer name for subword tokenization (e.g., 'EleutherAI/gpt-neo-125M'). "
+             "If not provided, uses character-level tokenization.",
+    )
     return parser.parse_args()
 
 
@@ -444,7 +506,11 @@ def main() -> None:
         distributed=distributed,
         world_size=world_size,
         rank=rank,
+        tokenizer_name=args.tokenizer,
     )
+
+    if is_main and args.tokenizer:
+        print(f"[info] Using subword tokenizer: {args.tokenizer} (vocab_size={vocab.size})")
 
     if distributed:
         dist.barrier()

@@ -104,16 +104,12 @@ python scripts/plot_training_curve.py \
 
 Each training run writes `train_log.jsonl` (tokens/s, drop-rate, load_cv, gate entropy, FLOPs, bandwidth, etc.) and `hparams.json` for reproducibility and visualisation.
 
-### Reproduction: Experiments A/B/C
+### Reproduction: Unified + Capacity
 ```bash
-# Experiment A (routing strategies top1/topk-hard/softk, CF 1.0/1.25)
-GPU_IDS=0,1,2,3 bash scripts/run_experiment_a.sh
-bash scripts/summarize_plot_experiment_a.sh  # -> results/experiment_a_summary.csv, frontier/overlay PNGs
+# Unified router sweep (top1/topk-hard/softk/hash/expert_choice × CF list)
+GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_unified.sh
+bash scripts/summarize_plot_unified.sh  # -> results/unified_summary.csv, frontier/overlay PNGs
 
-# Experiment B (capacity sweep, multi E/K)
+# Capacity sweep (multi E/K, CF 0.9–1.5)
 bash scripts/run_and_plot_experiment_b.sh    # -> results/capacity_cf_multi.jsonl and drop/tokens_per_s plots
-
-# Experiment C (add hash/expert_choice vs existing routers)
-GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_c.sh
-bash scripts/summarize_plot_experiment_c.sh  # -> results/expC_summary.csv and frontier/overlay
 ```
