@@ -309,6 +309,7 @@ The following table summarizes load balance metrics across all configurations in
 - Soft routing naturally achieves better balance through the auxiliary load-balancing loss
 - Expert choice provides explicit load balance control with learned gating
 - Gate entropy = 0 for hard routes (deterministic assignment); non-zero for soft routes (probabilistic weighting)
+- A scatter plot of `load_cv` vs `gate_entropy` (Figure 10, points annotated with k) shows: hash has perfect balance but random high entropy; top1/topk-hard have zero entropy but higher load_cv; softk/expert_choice sit in the “healthy” region with moderate entropy and lower load_cv.
 
 ### 5.4 Pareto Frontier Analysis
 
@@ -342,9 +343,9 @@ To validate that our findings generalize to larger model configurations, we cond
 
 **Key Findings**:
 
-1. **Strategy ranking is consistent**: The perplexity ranking (expert_choice > softk > hash > topk-hard > top1) matches our smaller-scale experiments exactly, demonstrating that our findings are **scale-invariant**.
+1. **Strategy ranking is consistent in tested scales**: The perplexity ranking (expert_choice > softk > hash > topk-hard > top1) matches our smaller-scale experiments (E=8→32), indicating similar trends at higher E.
 
-2. **Expert-choice achieves comprehensive leadership**: At larger scale, expert_choice dominates not only in perplexity but also in throughput (7.94M vs 6.37M for softk), achieving both best quality and best efficiency among K=2 strategies.
+2. **Expert-choice is a strong candidate at larger scale**: At this configuration, expert_choice dominates not only in perplexity but also in throughput (7.94M vs 6.37M for softk), achieving both best quality and best efficiency among K=2 strategies.
 
 3. **Parameter tuning matters**: With properly tuned parameters (E=32, CF=1.5, lower LR), drop rates remain manageable (15-31%) compared to the problematic 63-69% drop rates observed with E=64 and default settings.
 
@@ -409,6 +410,10 @@ This validates that our conclusions about routing strategy trade-offs **generali
 
 ![Subword Overlay](../results/subword_overlay.png)
 *Figure 9: Training curves with subword tokenization confirm soft routing strategies achieve better convergence.*
+
+### 6.5 Load Balance vs Gate Entropy (Unified)
+![Gate Balance](../results/gate_balance_unified.png)
+*Figure 10: Scatter of load_cv vs gate_entropy for unified sweep (points annotated with k). Hard routes (top1/topk-hard) have zero entropy and higher load_cv; hash has perfect balance but random gating; softk/expert_choice achieve moderate entropy with lower load_cv.*
 
 ## 7. Discussion
 
@@ -676,9 +681,9 @@ We presented **MoE Routing Bench**, a systematic benchmark for evaluating MoE ro
 
 4. **Trade-offs are moderate**: The quality gains from soft routing (~15–20% perplexity improvement) cost only ~20–25% throughput
 
-5. **Findings are scale-invariant**: The strategy ranking (expert_choice > softk > hash > topk-hard > top1) holds consistently across model scales (E=8 to E=32) and tokenization schemes (character-level to BPE)
+5. **Consistent trends in tested settings**: The strategy ranking (expert_choice > softk > hash > topk-hard > top1) holds across the scales and tokenization schemes we tested (E=8 to E=32, character-level to BPE).
 
-6. **Expert-choice scales best**: At larger scale (E=32, dim=512), expert_choice achieves both best perplexity (3.86) and highest throughput (7.94M tokens/s), making it the recommended default for production MoE systems
+6. **Expert-choice scales well**: At larger scale (E=32, dim=512), expert_choice achieves both best perplexity (3.86) and highest throughput (7.94M tokens/s), making it a strong candidate for larger MoE systems (full production-scale confirmation is future work).
 
 These findings provide practical guidance for MoE system design and connect to emerging trends in parameter-efficient routed fine-tuning.
 

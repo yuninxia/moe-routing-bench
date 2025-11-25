@@ -49,6 +49,7 @@ def summarize_run(run_dir: str) -> Dict[str, Any] | None:
     bw_gibps = [r.get("bw_GiBps_strict") for r in records if "bw_GiBps_strict" in r]
     drop_rates = [r.get("drop_rate") for r in records if "drop_rate" in r]
     load_cvs = [r.get("load_cv") for r in records if "load_cv" in r]
+    gate_entropies = [r.get("gate_entropy") for r in records if "gate_entropy" in r]
 
     best_record = min(records, key=lambda x: x.get("ppl", float("inf")))
     final_record = records[-1]
@@ -74,6 +75,7 @@ def summarize_run(run_dir: str) -> Dict[str, Any] | None:
         "median_bw_GiBps": _safe_median(bw_gibps),
         "mean_drop_rate": mean(drop_rates) if drop_rates else None,
         "mean_load_cv": mean(load_cvs) if load_cvs else None,
+        "mean_gate_entropy": mean(gate_entropies) if gate_entropies else None,
         "log_path": log_path,
     }
 

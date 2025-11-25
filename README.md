@@ -1,8 +1,19 @@
 # moe-routing-bench
 
+A benchmark suite for comparing Mixture-of-Experts (MoE) routing strategies in small-scale transformer models. Evaluates routing algorithms across metrics: perplexity, throughput, token drop rate, load balance (CV), and gate entropy.
+
 ## Proposal
 [Project Proposal](https://docs.google.com/document/d/1s6bXTtXZuCin6RbOFYJIVvWXMNcvPrVMaxMTPWTwwnU/edit?usp=sharing)
 
+## Implemented Routing Strategies
+
+| Strategy | Description | Key Characteristics |
+|----------|-------------|---------------------|
+| **top1** | Single highest-logit expert per token | Fastest, highest drop rate |
+| **topk-hard** | Top-k experts by logit, uniform weights | Balanced speed/quality |
+| **softk** | Top-k with learned softmax weights | Best quality, differentiable |
+| **hash** | Deterministic hash-based assignment | Perfect load balance, no learning |
+| **expert-choice** | Experts select top tokens | Best PPL + balance combined |
 
 ## Env Setup
 
@@ -17,99 +28,139 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -e .
 
-(optional) pip3 install torch --index-url https://download.pytorch.org/whl/cu128
+## Quick Start
 
-source ./resources.sh
-```
-
-## Usage
-
-### Install (editable)
 ```bash
+# Setup (HPC users adjust module load if needed)
+module purge && module load GCCcore/12.3.0 Python/3.11.3  # HPC only
+python -m venv .venv && source .venv/bin/activate
 pip install -e .
-```
 
-### Quick benches
-```bash
-python -m moe_routing_bench.cli bench-topk --impl torch --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 200
-python -m moe_routing_bench.cli bench-routing --impl-topk torch --num-tokens 16384 --num-experts 128 --top-k 2 --hidden-dim 4096 --iters 100
-python scripts/bench_pack.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
-```
-
-### Tests
-```bash
-pytest -q
-```
-
-### Additional benchmarks
-```bash
-python scripts/bench_pack.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
-python scripts/bench_pack_only.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
-python scripts/bench_combine_only.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --iters 100
-python scripts/bench_moe_layer.py --num-tokens 8192 --hidden-dim 1024 --num-experts 32 --top-k 2 --expand 4
-python scripts/sweep_pack.py --tokens 8192,16384 --hidden 2048,4096 --experts 32,64 --topk 1,2
-python scripts/sweep_capacity_ke.py --experts 32,64 --topk 1,2,4 --capacity-factors 1.0,1.25 --strategy softk --backend torch_soft --output results/capacity_ke.jsonl
-python scripts/bench_capacity.py --num-tokens 16384 --hidden-dim 4096 --num-experts 128 --top-k 2 --capacity-factors 1.00,1.10,1.25,1.50 --iters 50
-```
-
-### Metric conventions
-- `bw_GiBps_strict`: uses `(2 + 2·top_k)·hidden_dim·dtype_bytes` per token (pack + combine read/write).
-- `bytes_per_token_strict`: strict byte count per token; reported alongside bandwidth.
-- `load_cv`: coefficient of variation of per-expert token counts.
-- `avg_drop_rate`: fraction of assignments dropped when enforcing capacity.
-- All benchmarks fix `seed=17`; adjust as needed.
-
-### Training
-```bash
-python scripts/train_small.py --max-steps 200 --eval-interval 50 --device cuda
-```
-
-```bash
-# Export TinyStories splits to text (requires `pip install datasets`)
+# Prepare TinyStories data
 python scripts/export_tinystories.py --split train --out data/tinystories_train.txt
 python scripts/export_tinystories.py --split validation --out data/tinystories_val.txt
-```
 
-### Distributed & Routing sweeps
-```bash
-# 4×GPU DDP run (bf16, batch 128 / GPU)
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4 \
-  scripts/train_small.py --distributed --device cuda \
-  --data data/tinystories_train.txt --seq-len 512 --batch-size 128 \
-  --max-steps 2000 --eval-interval 200 --lr 1.2e-3 --warmup-steps 50 \
-  --outdir runs/tinystories_ddp_bs_128
-
-# Strategy × capacity sweep (pure PyTorch)
-CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/sweep_routing_train.py \
-  --data data/tinystories_train.txt --seq-len 512 --batch-per-gpu 128 \
-  --num-experts-list 64,128 --router-list top1,topk-hard,softk \
-  --topk-list 1,2,4 --capacity-factors 1.0,1.25,1.5 \
-  --seeds 17,18,19 --max-steps 1000 --eval-interval 200 \
-  --outdir-root runs/routing_sweep
-
-# Summarise & plot Pareto frontier
-python scripts/summarize_runs.py --runs 'runs/routing_sweep/*' \
-  --out results/routing_sweep_summary.csv
-python scripts/plot_frontier.py \
-  --summary results/routing_sweep_summary.csv \
-  --filter-E 128 --filter-dim 256 \
-  --out results/routing_frontier.png
-
-# Plot step-wise metrics for a single run
-python scripts/plot_training_curve.py \
-  --log runs/tinystories_ddp_bs_128/train_log.jsonl \
-  --metrics train_loss,val_loss,ppl \
-  --out results/tinystories_ddp_bs_128_curve.png
-```
-
-Each training run writes `train_log.jsonl` (tokens/s, drop-rate, load_cv, gate entropy, FLOPs, bandwidth, etc.) and `hparams.json` for reproducibility and visualisation.
-
-### Reproduction: Unified + Capacity
-```bash
-# Unified router sweep (top1/topk-hard/softk/hash/expert_choice × CF list)
+# Unified router sweep (E=8, char-level)
 GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_unified.sh
-bash scripts/summarize_plot_unified.sh  # -> results/unified_summary.csv, frontier/overlay PNGs
-
-# Capacity sweep (multi E/K, CF 0.9–1.5)
-bash scripts/run_and_plot_experiment_b.sh    # -> results/capacity_cf_multi.jsonl and drop/tokens_per_s plots
+bash scripts/summarize_plot_unified.sh
+python scripts/plot_gate_balance.py --summary results/unified_summary.csv --out results/gate_balance_unified.png
 ```
+
+**Unified outputs**:
+- `results/unified_summary.csv`
+- `results/unified_frontier.png`
+- `results/unified_overlay.png`
+- `results/gate_balance_unified.png`
+
+## Reproducing All Experiments
+
+### Experiment 1: Unified Router Sweep (E=8, char-level)
+
+Compares all 5 routing strategies with capacity factors used in our runs (CF=[1.0, 1.25]) on a small model.
+
+**Config**: E=8, dim=256, layers=4, K=2, CF=[1.0, 1.25]
+
+```bash
+# Run experiment (~1.5 hours on 4×L40S)
+GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_unified.sh
+
+# Generate summary CSV and plots
+bash scripts/summarize_plot_unified.sh
+```
+
+**Outputs**:
+- `results/unified_summary.csv` - Metrics for all runs
+- `results/unified_frontier.png` - PPL vs throughput Pareto frontier
+- `results/unified_overlay.png` - Training curves overlay
+- `results/gate_balance_unified.png` - load_cv vs gate_entropy scatter (optional: run `python scripts/plot_gate_balance.py --summary results/unified_summary.csv --out results/gate_balance_unified.png`)
+
+### Experiment 2: Capacity Factor Microbenchmark
+
+Isolates the effect of capacity factor on drop rate and throughput.
+
+**Config**: E=[64, 128, 256], K=[1, 2, 4], CF=[0.9, 1.0, 1.05, 1.1, 1.25, 1.5]
+
+```bash
+# Run experiment and plot (~30 min)
+bash scripts/run_and_plot_experiment_b.sh
+```
+
+**Outputs**:
+- `results/capacity_cf_multi.jsonl` - Raw benchmark data
+- `results/capacity_drop_rate_multi.png` - Drop rate vs CF
+- `results/capacity_tokens_per_s_multi.png` - Throughput vs CF
+
+### Experiment 3: Larger Scale Validation (E=32)
+
+Validates that routing strategy rankings hold at larger scale.
+
+**Config**: E=32, dim=512, layers=4, K=2, CF=1.5, lr=1e-4, warmup=200
+
+```bash
+# Run experiment (~2.5 hours on 4×L40S)
+GPU_IDS=0,1,2,3 bash scripts/run_experiment_larger_scale.sh
+
+# Generate summary and plots
+bash scripts/summarize_plot_larger_scale.sh
+```
+
+**Outputs**:
+- `results/larger_scale_summary.csv`
+- `results/larger_scale_frontier.png`
+- `results/larger_scale_overlay.png`
+
+### Experiment 4: Subword Tokenization (BPE)
+
+Validates that routing trade-offs hold with BPE tokenization.
+
+**Config**: E=8, dim=256, BPE tokenizer (EleutherAI/gpt-neo-125M), CF=1.25
+
+```bash
+# Run experiment (~50 min on 4×L40S)
+GPU_IDS=0,1,2,3 bash scripts/run_experiment_subword.sh
+
+# Generate summary and plots
+bash scripts/summarize_plot_subword.sh
+```
+
+**Outputs**:
+- `results/subword_summary.csv`
+- `results/subword_frontier.png`
+- `results/subword_overlay.png`
+
+### Quick Verification (Single GPU)
+
+For quick testing without full experiment runs:
+
+```bash
+# Smoke test (~2 min)
+python scripts/train_small.py --max-steps 200 --eval-interval 50 --device cuda
+
+# Test specific strategy
+python scripts/train_small.py \
+  --data data/tinystories_train.txt \
+  --router expert-choice \
+  --num-experts 8 \
+  --capacity-factor 1.25 \
+  --max-steps 500 \
+  --device cuda
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GPU_IDS` | `0,1,2,3` | Comma-separated GPU IDs |
+| `MAX_STEPS` | varies | Training steps |
+| `EVAL_INTERVAL` | varies | Evaluation frequency |
+| `STRATEGIES` | all | Space-separated strategies to run |
+
+### Expected Results Summary
+
+| Experiment | Best Strategy | PPL | Throughput |
+|------------|---------------|-----|------------|
+| Unified (E=8) | expert-choice | 5.50 | 2.33M tok/s |
+| Larger Scale (E=32) | expert-choice | 3.86 | 7.94M tok/s |
+| Subword (BPE) | expert-choice | 31.88 | 2.21M tok/s |
+
+**Key Finding**: Strategy ranking is consistent across scales and tokenization: `expert-choice > softk > hash > topk-hard > top1`

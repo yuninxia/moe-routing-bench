@@ -19,8 +19,6 @@
 
 ## Phase 2: Final Improvements (3-Day Sprint)
 
-Based on peer feedback (current score estimate: 88-90), the following improvements are prioritized to reach 95+ score.
-
 ### 🔴 High Priority (Must Do – Day 1-2)
 
 These items provide the highest score improvement with reasonable effort:
@@ -42,6 +40,9 @@ These items provide the highest score improvement with reasonable effort:
   - Results added to report Section 5.6 "Subword Tokenization Validation"
   - **Key finding**: Strategy ranking consistent with char-level (expert_choice > softk > top1)
   - Results: expert_choice PPL=31.88, softk PPL=32.07, top1 PPL=34.56
+- [ ] **Report polish & optional visualization**
+  - Soften claims (avoid “scale-invariant”/“production default” wording; emphasize “in our tested scales/CF/K”).
+  - OPTIONAL: plot `gate_entropy vs load_cv` using `python scripts/plot_gate_balance.py --summary results/unified_summary.csv --out results/gate_balance_unified.png` (reuse in slides if helpful).
 
 - [ ] **Prepare Slides** (~3-4 hours) – **MUST COMPLETE BY DAY 3**
   - 8-12 slides covering:
