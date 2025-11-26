@@ -476,18 +476,18 @@ PERFT introduces routed PEFT modules that leverage MoE routing for adapter selec
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    PERFT Variants Overview                       │
+│                    PERFT Variants Overview                      │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
+│                                                                 │
 │  Input Token ──► Router ──┬──► Expert 1 + LoRA_1 ──┐            │
 │                           ├──► Expert 2 + LoRA_2 ──┼──► Output  │
 │                           └──► Expert E + LoRA_E ──┘            │
-│                                                                  │
+│                                                                 │
 │  PERFT-R (Routed):     Independent routing for PEFT experts     │
 │  PERFT-E (Embedded):   Reuse base MoE routing for PEFT          │
 │  PERFT-D (Dense):      Shared adapter across all experts        │
 │  PERFT-S (Single):     Single adapter as additional expert      │
-│                                                                  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -499,7 +499,7 @@ PERFT introduces routed PEFT modules that leverage MoE routing for adapter selec
 | PERFT-E | Match base model | Inherit routing for consistency |
 | PERFT-D/S | Any (routing-agnostic) | Shared adapter bypasses routing |
 
-**Small-scale PERFT frontier (our sweep, 500 steps on TinyStories).** We ran a lightweight PERFT sweep (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. Activated parameter efficiency is computed as (TopK/N)×(LoRA rank / 16); performance is 1/PPL (lower PPL = higher score). The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`) shows:
+**Small-scale PERFT frontier.** We ran a lightweight PERFT sweep on the commonsense_170k QA dataset (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. Activated parameter efficiency is computed as (TopK/N)×(LoRA rank / 16); performance is 1/PPL (lower PPL = higher score). The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`) shows:
 - **PERFT-R dominates**: For a given efficiency, PERFT-R points sit at higher 1/PPL than PERFT-E and Shared.
 - **Efficiency sweet spot**: Sparse Top1/8 or Top1/4 with rank 8–16 already reaches near-best performance; increasing rank/TopK yields smaller gains.
 - **PERFT-E vs Shared**: Embedded adapters clearly outperform shared adapters at similar efficiency.

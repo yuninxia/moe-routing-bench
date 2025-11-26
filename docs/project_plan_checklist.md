@@ -21,6 +21,19 @@
 - [ ] LaTeX template conversion (optional): convert `docs/report.md` to ICML/NeurIPS template.
 - [ ] README final check: ensure reproduction commands/results summary reflect current scripts.
 
+## Phase 3 follow-ups (from proposal alignment)
+- [ ] PERFT longer run to better surface R vs E vs Shared gaps (command ready to run):
+  ```
+  HF_HOME=/scratch/yx87/playground/moe-routing-bench/.cache/hf \
+  GPU_IDS=0,1,2,3 \
+  RANK_LIST="8 16 32" \
+  PEFT_EXPERTS_LIST="4 8" \
+  TOPK_LIST="1 2" \
+  MAX_STEPS=1500 \
+  EVAL_STEP=300 \
+  bash scripts/run_perft_variants_quick.sh
+  ```
+
 ## Completed experiments
 | Experiment | Status | Key result |
 |------------|--------|------------|

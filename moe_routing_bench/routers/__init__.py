@@ -4,7 +4,6 @@ from .pack_torch import pack_by_expert_torch, unpack_by_expert_torch
 
 # Register default backends
 from . import pack_soft_torch  # noqa: F401
-from . import pack_quack  # noqa: F401
 
 __all__ = [
     "PackCombine",

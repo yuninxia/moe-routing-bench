@@ -5,6 +5,7 @@ A benchmark suite for comparing Mixture-of-Experts (MoE) routing strategies in s
 ## Proposal
 [Project Proposal](https://docs.google.com/document/d/1s6bXTtXZuCin6RbOFYJIVvWXMNcvPrVMaxMTPWTwwnU/edit?usp=sharing)
 [Report (Markdown)](docs/report.md)
+[Slides Outline](docs/slides.md)
 
 ## Implemented Routing Strategies
 

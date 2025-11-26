@@ -24,11 +24,11 @@ def parse_args() -> argparse.Namespace:
 
     bench_topk_parser = sub.add_parser("bench-topk", help="Benchmark top-k selection")
     _add_common_args(bench_topk_parser)
-    bench_topk_parser.add_argument("--impl", type=str, default="torch", choices=["torch", "quack"])
+    bench_topk_parser.add_argument("--impl", type=str, default="torch", choices=["torch"])
 
     bench_routing_parser = sub.add_parser("bench-routing", help="Benchmark dispatch and combine")
     _add_common_args(bench_routing_parser)
-    bench_routing_parser.add_argument("--impl-topk", type=str, default="torch", choices=["torch", "quack"])
+    bench_routing_parser.add_argument("--impl-topk", type=str, default="torch", choices=["torch"])
 
     return parser.parse_args()
 

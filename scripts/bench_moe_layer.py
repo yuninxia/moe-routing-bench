@@ -141,7 +141,7 @@ def parse_args():
     parser.add_argument("--expand", type=int, default=4)
     parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--backend", type=str, default="torch_soft", choices=["torch_soft", "quack"])
+    parser.add_argument("--backend", type=str, default="torch_soft", choices=["torch_soft"])
     parser.add_argument("--capacity-factor", type=float, default=1.25, dest="capacity_factor")
     parser.add_argument("--renorm-after-drop", action="store_true", dest="renorm_after_drop")
     parser.add_argument("--temperature", type=float, default=1.0)

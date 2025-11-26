@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--experts", type=str, default="32,64,128")
     parser.add_argument("--topk", type=str, default="1,2,4")
     parser.add_argument("--capacity-factors", type=str, default="1.0,1.1,1.25,1.5")
-    parser.add_argument("--backend", type=str, default="torch_soft", choices=["torch_soft", "quack"])
+    parser.add_argument("--backend", type=str, default="torch_soft", choices=["torch_soft"])
     parser.add_argument("--strategy", type=str, default="softk", choices=["top1", "topk_hard", "softk"])
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--soft_normalize", type=str, default="softmax", choices=["softmax", "sum"])

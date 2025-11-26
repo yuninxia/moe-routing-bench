@@ -45,7 +45,7 @@
 
 ## Page 8 – PERFT Frontier (Adapter Routing)
 - Figure: `../results/perft_variants/perft_frontier_loss_vs_eff.png` (1/PPL vs activated param efficiency).
-- Config: ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)}; 500 steps.
+- Config: commonsense_170k QA dataset; ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)}; 500 steps.
 - Takeaways:
   - PERFT-R dominates; PERFT-E > Shared at same efficiency.
   - Sweet spot: sparse Top1/8 or Top1/4, rank 8–16; higher rank → diminishing returns.
