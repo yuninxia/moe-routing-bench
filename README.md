@@ -4,6 +4,7 @@ A benchmark suite for comparing Mixture-of-Experts (MoE) routing strategies in s
 
 ## Proposal
 [Project Proposal](https://docs.google.com/document/d/1s6bXTtXZuCin6RbOFYJIVvWXMNcvPrVMaxMTPWTwwnU/edit?usp=sharing)
+[Report (Markdown)](docs/report.md)
 
 ## Implemented Routing Strategies
 
@@ -154,6 +155,32 @@ python scripts/train_small.py \
 | `MAX_STEPS` | varies | Training steps |
 | `EVAL_INTERVAL` | varies | Evaluation frequency |
 | `STRATEGIES` | all | Space-separated strategies to run |
+
+## PERFT Variants (small-scale frontier)
+
+Reproduce PERFT-R/E vs Shared adapter (500-step) frontier on TinyStories.
+
+```bash
+# Download OLMoE checkpoint (one-time)
+HF_HOME=/scratch/yx87/playground/moe-routing-bench/.cache/hf \
+CACHE_DIR=$HF_HOME \
+bash scripts/download_olmoe_checkpoint.sh
+
+# Run lightweight PERFT sweep (R/E/Shared; ranks 8/16/32; TopK/N=1/2 over N=4/8)
+HF_HOME=/scratch/yx87/playground/moe-routing-bench/.cache/hf \
+GPU_IDS=0,1,2,3 \
+RANK_LIST="8 16 32" \
+PEFT_EXPERTS_LIST="4 8" \
+TOPK_LIST="1 2" \
+bash scripts/run_perft_variants_quick.sh
+
+# Plot Fig.4-style frontier (performance=1/PPL vs efficiency; size=rank; alpha=TopK/N)
+python scripts/plot_perft_variants.py
+```
+
+Outputs:
+- `results/perft_variants/variants_summary.csv`
+- `results/perft_variants/perft_frontier_loss_vs_eff.png`
 
 ### Expected Results Summary
 

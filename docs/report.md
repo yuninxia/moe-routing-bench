@@ -1,4 +1,4 @@
-# MoE Routing Bench – Report
+# MoE Routing Bench
 
 ## Abstract
 
@@ -493,6 +493,15 @@ PERFT introduces routed PEFT modules that leverage MoE routing for adapter selec
 | PERFT-R | softk or expert_choice | Low load_cv ensures all adapters receive gradients |
 | PERFT-E | Match base model | Inherit routing for consistency |
 | PERFT-D/S | Any (routing-agnostic) | Shared adapter bypasses routing |
+
+**Small-scale PERFT frontier (our sweep, 500 steps on TinyStories).** We ran a lightweight PERFT sweep (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`, performance=1/PPL vs activated parameter efficiency) shows:
+- **PERFT-R dominates**: For a given efficiency, PERFT-R points sit at higher 1/PPL than PERFT-E and Shared.
+- **Efficiency sweet spot**: Sparse Top1/8 or Top1/4 with rank 8–16 already reaches near-best performance; increasing rank/TopK yields smaller gains.
+- **PERFT-E vs Shared**: Embedded adapters clearly outperform shared adapters at similar efficiency.
+
+This mirrors the PERFT paper’s trend (R > E > Shared) even under short training, supporting the “routed adapters > shared” conclusion for parameter-efficient fine-tuning.
+
+![PERFT Frontier (performance vs efficiency)](../results/perft_variants/perft_frontier_loss_vs_eff.png)
 
 #### 7.3.2 Pseudocode: Routed Adapter Forward Pass
 

@@ -8,6 +8,9 @@ Each function returns a list of records formatted for `finetune.py`:
     }
 The registry below exposes the train split for each benchmark so scripts can
 export them individually or as a merged corpus.
+
+NOTE: Updated for datasets>=3.0 which no longer supports trust_remote_code.
+Some datasets (piqa, social_i_qa) now use alternative HuggingFace repos.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ def _build_input(stem: str, prefixes: Sequence[str], choices: Sequence[str]) -> 
 
 
 def build_boolq(split: str = "train") -> List[dict]:
-    dataset = load_dataset("super_glue", "boolq", split=split, trust_remote_code=True)
+    dataset = load_dataset("super_glue", "boolq", split=split)
     prefixes = ["false", "true"]
     header = "Answer the question with `true` or `false`."
     records: List[dict] = []
@@ -46,7 +49,12 @@ def build_boolq(split: str = "train") -> List[dict]:
 
 
 def build_piqa(split: str = "train") -> List[dict]:
-    dataset = load_dataset("piqa", split=split, trust_remote_code=True)
+    # Load from parquet conversion to avoid loading script issue in datasets>=3.0
+    dataset = load_dataset(
+        "parquet",
+        data_files=f"hf://datasets/ybisk/piqa@refs/convert/parquet/plain_text/{split}/*.parquet",
+        split="train",  # parquet loader uses "train" as default split name
+    )
     prefixes = ["solution1", "solution2"]
     header = "Choose the more plausible solution (solution1 or solution2)."
     records: List[dict] = []
@@ -63,7 +71,12 @@ def build_piqa(split: str = "train") -> List[dict]:
 
 
 def build_social_iqa(split: str = "train") -> List[dict]:
-    dataset = load_dataset("social_i_qa", split=split, trust_remote_code=True)
+    # Load from parquet conversion to avoid loading script issue in datasets>=3.0
+    dataset = load_dataset(
+        "parquet",
+        data_files=f"hf://datasets/allenai/social_i_qa@refs/convert/parquet/default/{split}/*.parquet",
+        split="train",  # parquet loader uses "train" as default split name
+    )
     prefixes = ["answer1", "answer2", "answer3"]
     header = "Pick the best answer (answer1, answer2, or answer3)."
     records: List[dict] = []
@@ -86,7 +99,8 @@ def build_social_iqa(split: str = "train") -> List[dict]:
 
 
 def build_hellaswag(split: str = "train") -> List[dict]:
-    dataset = load_dataset("hellaswag", split=split, trust_remote_code=True)
+    # Use Rowan/hellaswag which has native parquet support (no loading script)
+    dataset = load_dataset("Rowan/hellaswag", split=split)
     prefixes = ["ending1", "ending2", "ending3", "ending4"]
     header = "Select the option that best completes the situation (ending1-4)."
     records: List[dict] = []
@@ -103,7 +117,8 @@ def build_hellaswag(split: str = "train") -> List[dict]:
 
 
 def build_winogrande(split: str = "train") -> List[dict]:
-    dataset = load_dataset("winogrande", "winogrande_xl", split=split, trust_remote_code=True)
+    # Use allenai/winogrande which has native parquet support (no loading script)
+    dataset = load_dataset("allenai/winogrande", "winogrande_xl", split=split)
     prefixes = ["option1", "option2"]
     header = "Choose the word that correctly fills the blank (option1 or option2)."
     records: List[dict] = []
@@ -121,7 +136,7 @@ def build_winogrande(split: str = "train") -> List[dict]:
 
 
 def _build_arc(config: str, split: str) -> List[dict]:
-    dataset = load_dataset("allenai/ai2_arc", config, split=split, trust_remote_code=True)
+    dataset = load_dataset("allenai/ai2_arc", config, split=split)
     header = "Answer the multiple-choice science question (answer1-5)."
     records: List[dict] = []
     for example in dataset:
@@ -148,7 +163,7 @@ def build_arc_easy(split: str = "train") -> List[dict]:
 
 
 def build_openbookqa(split: str = "train") -> List[dict]:
-    dataset = load_dataset("allenai/openbookqa", "main", split=split, trust_remote_code=True)
+    dataset = load_dataset("allenai/openbookqa", "main", split=split)
     header = "Answer the multiple-choice science question (answer1-4)."
     records: List[dict] = []
     for example in dataset:

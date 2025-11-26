@@ -74,6 +74,7 @@ def train(
         batch_size: int = 128,
         micro_batch_size: int = 4,
         num_epochs: int = 3,
+        max_steps: int = -1,  # If > 0, overrides num_epochs
         learning_rate: float = 3e-4,
         weight_decay: float = 0.0,
         cutoff_len: int = 256,
@@ -142,9 +143,15 @@ def train(
     
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     ddp = world_size != 1
+    local_rank = int(os.environ.get("LOCAL_RANK") or 0)
     if ddp:
-        device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
+        # In DDP mode, each process loads model on its own GPU
+        # device_map='auto' is incompatible with DDP (it does model parallelism, not data parallelism)
+        device_map = {"": local_rank}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
+    else:
+        # Single GPU or model parallelism mode
+        device_map = "auto"
 
     # Check if parameter passed or if set within environ
     use_wandb = len(wandb_project) > 0 or (
@@ -179,7 +186,7 @@ def train(
             base_model,
             config=config,
             torch_dtype=torch.bfloat16,
-            device_map='auto'#{"": int(os.environ.get("LOCAL_RANK") or 0)},
+            device_map=device_map,
         )
     elif 'OLMoE' in base_model:
         config = OlmoeAdapterConfig(
@@ -200,7 +207,7 @@ def train(
             base_model,
             config=config,
             torch_dtype=torch.bfloat16,
-            device_map='auto'#{"": int(os.environ.get("LOCAL_RANK") or 0)},
+            device_map=device_map,
         )
     
     tokenizer.pad_token_id = (
@@ -319,7 +326,8 @@ def train(
             per_device_train_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
             warmup_steps=100,
-            num_train_epochs=num_epochs,
+            num_train_epochs=num_epochs if max_steps <= 0 else 100,  # Large value if using max_steps
+            max_steps=max_steps if max_steps > 0 else -1,
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             bf16=True,

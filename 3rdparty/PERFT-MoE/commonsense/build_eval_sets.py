@@ -4,6 +4,9 @@
 This script mirrors the formatting expected by `commonsense/commonsense_evaluate.py`:
 for each benchmark it creates `<repo>/commonsense/dataset/<name>/test.json`
 containing dictionaries with at least `instruction` and `answer` fields.
+
+NOTE: Updated for datasets>=3.0 which no longer supports trust_remote_code.
+Some datasets use parquet conversion path to bypass loading script issues.
 """
 
 from __future__ import annotations
@@ -11,9 +14,37 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Callable, Dict, Iterable, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 from datasets import load_dataset
+
+
+def load_dataset_compat(dataset_name: str, config: Optional[str], split: str):
+    """Load dataset with compatibility for datasets>=3.0.
+
+    Uses parquet conversion path for datasets that have loading scripts.
+    """
+    # Datasets that need parquet loading due to loading script issues
+    PARQUET_DATASETS = {
+        "piqa": ("ybisk/piqa", "plain_text"),
+        "social_i_qa": ("allenai/social_i_qa", "default"),
+        "hellaswag": ("Rowan/hellaswag", "default"),
+        "winogrande": ("allenai/winogrande", "winogrande_xl"),
+    }
+
+    if dataset_name in PARQUET_DATASETS:
+        repo, subset = PARQUET_DATASETS[dataset_name]
+        return load_dataset(
+            "parquet",
+            data_files=f"hf://datasets/{repo}@refs/convert/parquet/{subset}/{split}/*.parquet",
+            split="train",
+        )
+
+    # Standard loading for other datasets
+    if config:
+        return load_dataset(dataset_name, config, split=split)
+    else:
+        return load_dataset(dataset_name, split=split)
 
 
 def mc_instruction(
@@ -181,10 +212,7 @@ def main() -> None:
 
     for name, (dataset_name, config, default_split, builder) in DATASET_SPECS.items():
         split = args.split if args.split else default_split
-        if config:
-            hf_split = load_dataset(dataset_name, config, split=split, trust_remote_code=True)
-        else:
-            hf_split = load_dataset(dataset_name, split=split, trust_remote_code=True)
+        hf_split = load_dataset_compat(dataset_name, config, split)
 
         formatted = [builder(record) for record in hf_split]
         out_dir = os.path.join(args.output_root, name)
