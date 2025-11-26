@@ -4,6 +4,11 @@
 
 Mixture-of-Experts (MoE) models enable scaling model capacity without proportional increases in computational cost by activating only a subset of parameters per input. However, the choice of routing algorithm—how tokens are assigned to experts—critically affects model quality, training stability, and inference efficiency. In this work, we present **MoE Routing Bench**, a comprehensive benchmark suite for evaluating routing strategies in small-scale MoE Transformers. We implement and compare five routing algorithms: top-1, top-k hard, soft top-k (softk), hash-based routing, and expert-choice routing. Through systematic experiments on TinyStories data, we analyze trade-offs among perplexity, throughput, token drop rate, load balance (CV), and gate entropy across varying capacity factors. Our results demonstrate that: (1) soft routing strategies (softk, expert-choice) achieve superior perplexity with moderate throughput costs; (2) capacity factor 1.05–1.25 eliminates token dropping with negligible overhead; (3) content-agnostic hash routing achieves perfect load balance but significantly worse model quality, confirming that learned routing is essential. We connect our findings to recent trends in parameter-efficient routed fine-tuning (PERFT) and discuss implications for MoE system design.
 
+**Contributions (this work)**:
+- A lightweight but complete **MoE Routing Bench**: 5 routers (top-1, topk-hard, softk, hash, expert-choice) with capacity/drop-rate/load balance metrics and scripts for unified sweeps, capacity microbench, and larger/subword validation.
+- **Systematic routing study**: unified frontier (E=8), capacity factor sweep, larger-scale (E=32) and subword validation, all with reproducible commands and summary CSVs.
+- **PERFT bridge**: a small-scale PERFT-R/E vs Shared frontier (500-step sweep) that mirrors the R > E > Shared trend in the PERFT paper, plus guidance for vLLM-style routed adapters.
+
 ## 1. Introduction
 
 ### 1.1 Motivation
@@ -494,7 +499,7 @@ PERFT introduces routed PEFT modules that leverage MoE routing for adapter selec
 | PERFT-E | Match base model | Inherit routing for consistency |
 | PERFT-D/S | Any (routing-agnostic) | Shared adapter bypasses routing |
 
-**Small-scale PERFT frontier (our sweep, 500 steps on TinyStories).** We ran a lightweight PERFT sweep (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`, performance=1/PPL vs activated parameter efficiency) shows:
+**Small-scale PERFT frontier (our sweep, 500 steps on TinyStories).** We ran a lightweight PERFT sweep (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. Activated parameter efficiency is computed as (TopK/N)×(LoRA rank / 16); performance is 1/PPL (lower PPL = higher score). The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`) shows:
 - **PERFT-R dominates**: For a given efficiency, PERFT-R points sit at higher 1/PPL than PERFT-E and Shared.
 - **Efficiency sweet spot**: Sparse Top1/8 or Top1/4 with rank 8–16 already reaches near-best performance; increasing rank/TopK yields smaller gains.
 - **PERFT-E vs Shared**: Embedded adapters clearly outperform shared adapters at similar efficiency.

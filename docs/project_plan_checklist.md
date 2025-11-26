@@ -1,6 +1,6 @@
 # MoE Routing Bench – Project Checklist
 
-## Phase 1: Core Implementation (completed)
+## Phase 1: Core Implementation
 - [x] Scope/storyline locked (Topic 2): small-scale MoE routing trade-offs (top1/topk-hard/softk) + capacity factor; link to routed PEFT/PERFT and vLLM MoE+LoRA in report intro.
 - [x] Environment sanity: `pip install -e .`, `pytest -q`, smoke `python scripts/train_small.py --max-steps 50 --eval-interval 25 --device cuda`.
 - [x] Data prep: TinyStories via `scripts/export_tinystories.py` into `data/`.
@@ -16,7 +16,8 @@
 - [x] Larger scale validation: E=32, dim=512, layers=4; strategies top1/topk-hard/softk/hash/expert_choice; CF=1.5; lr=1e-4; warmup=200.
 - [x] Report polish: softened claims to “in tested scales/configs”; added gate balance scatter (load_cv vs gate_entropy).
 - [x] PERFT small-scale frontier (500-step sweep; R/E/Shared; ranks 8/16/32; TopK/N=1/2 over N=4/8): `run_perft_variants_quick.sh` + `plot_perft_variants.py` → `results/perft_variants/perft_frontier_loss_vs_eff.png`.
-- [ ] Slides (8–12 pages): motivation; related work; MoE Routing Bench overview; capacity curves; unified frontier/overlay; larger-scale results; subword results; gate balance; PERFT/vLLM; limitations/future work.
+- [x] Slides outline drafted (`docs/slides.md`, ~10 pages: motivation → bench → capacity → unified → larger/subword → PERFT frontier → implications → conclusion).
+- [ ] Slide deck (8–12 pages) to finalize in Google Slides/LaTeX.
 - [ ] LaTeX template conversion (optional): convert `docs/report.md` to ICML/NeurIPS template.
 - [ ] README final check: ensure reproduction commands/results summary reflect current scripts.
 
@@ -30,7 +31,7 @@
 
 ## Resources
 - Hardware: 4× NVIDIA L40S GPUs.
-- Completed training times: subword ~50 min; larger scale ~2.5 hours; unified sweep ~1.5 hours.
+- Completed training times: subword ~50 min; larger scale ~2.5 hours; unified sweep ~1.5 hours; PERFT sweep ~4 hours.
 
 ## Success criteria
 - Report covers core papers with detailed discussion.
