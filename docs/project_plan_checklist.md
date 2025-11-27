@@ -55,3 +55,38 @@
 | PERFT figures | Complete | `results/perft_variants/*.png` |
 | Summary CSVs | Complete | `results/*_summary.csv` |
 | Presentation slides | Pending | (to be added) |
+
+## Figures for Report/Slides
+
+### Conceptual Diagrams (Drawing)
+- [x] **1.1 MoE Architecture Diagram** — `figures/moe_architecture.png` (Figure 1 in report, Page 4 in slides)
+- [x] **1.2 Token Dropping Illustration** — `figures/token_dropping_mechanism.png` (Figure 3 in report, Page 6 in slides)
+- [x] **1.3 Routing Strategy Comparison** — `figures/routing_strategies_comparison.png` (Figure 2 in report, Page 5 in slides)
+
+### Data-Driven Figures (Code)
+- [x] **2.1 Expert Load Distribution Bar** — `results/expert_load_distribution.png` (Figure 11 in report, Page 16 in slides)
+- [x] **2.2 Token-Expert Heatmap** — `results/routing_heatmap.png`, `results/routing_heatmap_summary.png` (Figures 12-13 in report, Pages 17-18 in slides)
+
+### Literature Context Figures
+- [x] **3.1 MoE Evolution Timeline** — `figures/moe_evolution_timeline.png` (Figure 4 in report, Page 3 in slides)
+
+### Advanced Visualizations
+- [x] **4.1 Colored Token Visualization** — `results/token_routing_colored.png`, `results/token_routing_colored_by_char_type.png` (Figures 15-16 in report, Pages 20-21 in slides)
+- [x] **4.2 PERFT Architecture Diagram** — `figures/perft_architecture.png` (Figure 17 in report, Page 13 in slides)
+
+### Supplementary Figures
+- [x] **5.1 Pareto Frontier Annotated** — `results/unified_frontier_annotated.png` (Figure 14 in report, Page 19 in slides)
+
+### Figure Summary Table
+
+| ID  | Figure                         | Type    | Output Location                          | Status |
+|-----|--------------------------------|---------|------------------------------------------|--------|
+| 1.1 | MoE Architecture Diagram       | Drawing | `figures/moe_architecture.png`           | [x]    |
+| 1.2 | Token Dropping Illustration    | Drawing | `figures/token_dropping_mechanism.png`   | [x]    |
+| 1.3 | Routing Strategy Comparison    | Drawing | `figures/routing_strategies_comparison.png` | [x] |
+| 2.1 | Expert Load Distribution       | Code    | `results/expert_load_distribution.png`   | [x]    |
+| 2.2 | Token-Expert Heatmap           | Code    | `results/routing_heatmap*.png`           | [x]    |
+| 3.1 | MoE Evolution Timeline         | Drawing | `figures/moe_evolution_timeline.png`     | [x]    |
+| 4.1 | Colored Token Visualization    | Code    | `results/token_routing_colored*.png`     | [x]    |
+| 4.2 | PERFT Architecture Diagram     | Drawing | `figures/perft_architecture.png`         | [x]    |
+| 5.1 | Pareto Frontier Annotated      | Code    | `results/unified_frontier_annotated.png` | [x]    |

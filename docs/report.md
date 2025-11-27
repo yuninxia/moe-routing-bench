@@ -140,6 +140,9 @@ This work provides theoretical grounding for why routing and expert parameters m
 
 Our benchmark systematically explores this design space in a controlled setting.
 
+![MoE Evolution Timeline](../figures/moe_evolution_timeline.png)
+*Figure 4: Evolution of MoE routing algorithms from 2017 to 2024. The timeline covers the five core papers required for this project (Sparsely-Gated MoE, DDOME, Soft MoE, PERFT, Chain-of-Experts) along with key milestones (GShard, Switch Transformer, Expert Choice, DeepSeekMoE). Key trends include the shift from sparse to soft routing, from token-choice to expert-choice, from auxiliary losses to loss-free balancing, and the emergence of routed parameter-efficient fine-tuning.*
+
 ## 3. Methods
 
 ### 3.1 Model Architecture
@@ -151,6 +154,9 @@ We implement **TinyMoEModel**, a Transformer language model with MoE feed-forwar
 - **MoEFeedForward**: Router Linear → Routing Strategy → Pack → GroupFFNExperts → Combine
 
 Default hyperparameters: `dim=256, layers=2-4, heads=4, num_experts=8, ffn_mult=4, dtype=bf16`
+
+![MoE Architecture](../figures/moe_architecture.png)
+*Figure 1: MoE Feed-Forward Layer architecture. Input tokens x ∈ ℝ^{T×d} pass through a router W_r to produce gating logits g ∈ ℝ^{T×E}. Top-k selection yields expert indices I and combination weights w. The Dispatch (Pack) operation reorganizes tokens into expert-specific buffers x_e ∈ ℝ^{E×C×d}, where capacity C = ⌈α·Tk/E⌉. Each expert FFN f_e processes its buffer independently, and the Combine operation reconstructs the output y by weighted summation.*
 
 ### 3.2 Routing Strategies Implemented
 
@@ -169,6 +175,9 @@ We implement five routing strategies spanning the design space:
 **Expert-First Routing**:
 - **Expert Choice**: Experts select top tokens by affinity scores; tokens keep up to k selected experts ranked by original logits; combines load-balance benefits of expert choice with learned gating
 
+![Routing Strategies Comparison](../figures/routing_strategies_comparison.png)
+*Figure 2: Comparison of five routing strategies. Top-1 sends each token to a single expert (fastest, highest drop rate). Top-k Hard and Soft Top-k route to k experts with uniform or learned weights respectively. Hash routing uses deterministic position-based assignment (perfect load balance, CV=0). Expert Choice inverts the routing direction—experts select tokens, achieving balanced load by construction.*
+
 ### 3.3 Capacity and Token Dropping
 
 Expert capacity is computed as:
@@ -179,6 +188,9 @@ capacity = ceil(capacity_factor × tokens × k / num_experts)
 Tokens exceeding expert capacity are dropped. We report:
 - **drop_rate**: Fraction of token-expert assignments dropped
 - **token_drop_rate**: Fraction of tokens with all assignments dropped
+
+![Token Dropping Mechanism](../figures/token_dropping_mechanism.png)
+*Figure 3: Token dropping mechanism. (a) With top-k routing (k=2), 8 tokens generate 16 assignments distributed across 4 experts. Expert capacity C limits how many assignments each expert can accept—tokens arriving after capacity is reached are dropped. (b) Drop rate vs. capacity factor α: at α < 1.0, drops are guaranteed; α ≥ 1.05 achieves near-zero drops with minimal memory overhead.*
 
 ### 3.4 Metrics
 
@@ -432,6 +444,107 @@ This validates that our conclusions about routing strategy trade-offs **generali
 ![Load vs PPL](../results/unified_load_vs_ppl.png)
 *Figure 10: mean_load_cv vs best_val_ppl. Hash achieves perfect balance but worst PPL; softk/expert-choice sit at moderate load_cv with best PPL; hard routes (top1/topk-hard) have high load_cv and poorer PPL. Load balance alone does not guarantee quality.*
 
+### 6.7 Expert Load Distribution
+![Expert Load Distribution](../results/expert_load_distribution.png)
+*Figure 11: Per-expert token counts from trained checkpoints (E=8, K=2, CF=1.25). Each subplot shows the distribution of tokens across 8 experts for a given routing strategy, with mean (red dashed line), CV, and drop rate annotated.*
+
+**Analysis**:
+- **Hash** achieves perfect uniformity (CV=0.00, Drop=0.0%), with all experts receiving exactly 8192 tokens—the theoretical maximum for uniform distribution. This validates hash as a pure load-balance baseline.
+- **Expert-choice** and **softk** achieve moderate balance (CV≈0.29, Drop=4-6%), with learned preferences distributing tokens across experts while maintaining reasonable utilization.
+- **Top-1** exhibits severe imbalance (CV=0.63, Drop=27.5%), with experts 0 and 7 receiving ~4200 tokens while experts 4 and 5 receive only ~1500-1700. This 2.5× disparity explains its high drop rate—popular experts overflow capacity.
+- **Topk-hard** shows intermediate imbalance (CV=0.51, Drop=15.8%), less extreme than top-1 due to spreading load across 2 experts per token.
+
+The correlation between load CV and drop rate is clear: higher imbalance leads to more capacity overflow. Critically, hash's perfect balance comes at the cost of worst perplexity (see Section 5.2), demonstrating that **load balance is necessary but not sufficient for quality**.
+
+### 6.8 Token-Expert Routing Patterns
+![Routing Heatmap Summary](../results/routing_heatmap_summary.png)
+*Figure 12: Left: Average experts utilized per token (K=2 strategies use 2.00, top-1 uses 1.00). Right: Expert selection frequency by strategy, showing how often each expert is chosen across tokens.*
+
+**Analysis**:
+- The left panel confirms configuration consistency: all K=2 strategies activate exactly 2 experts per token, while top-1 activates exactly 1.
+- The right panel reveals learned expert preferences:
+  - **Hash** shows near-uniform 25% selection per expert (K=2 out of 8 experts = 25% base rate), confirming no content-based preference.
+  - **Expert-choice** exhibits extreme preference for expert 0 (~70% selection rate), suggesting this expert learned to capture common patterns, with remaining tokens distributed among experts 4-7.
+  - **Softk** prefers experts 3, 4, and 7 (>30% each), while avoiding expert 4 (<10%)—indicating learned specialization.
+  - **Topk-hard** concentrates on expert 4 (~42%), demonstrating that even without soft weights, routing can develop strong preferences.
+  - **Top-1** peaks at experts 0 and 7 (~35% each), with minimal selection of experts 4-5 (<10%).
+
+### 6.9 Token-Expert Routing Heatmaps
+![Token-Expert Routing Heatmap](../results/routing_heatmap.png)
+*Figure 13: Token-expert routing assignments from trained models (64 tokens × 8 experts). Color intensity indicates routing weight (1.0 = full assignment). Each panel shows a different routing strategy.*
+
+**Analysis**:
+- **Expert-choice** (Blues): Shows structured vertical bands indicating certain experts are consistently selected across token positions. Weight variation (light to dark blue) reflects the learned gating probabilities.
+- **Hash** (Greens): Exhibits a distinctive diagonal stripe pattern—deterministic position-based routing that cycles through expert pairs. No weight variation (uniform 0.5 per expert since K=2).
+- **Softk** (Oranges): Dense horizontal patterns with clear weight gradients (light=low weight, dark=high weight). Experts 2, 3, and 4 show consistent activation across most tokens.
+- **Top-1** (Purples): Extremely sparse—only single cells per row. Experts 0, 3, 4, and 7 receive most assignments, confirming the load imbalance seen in Figure 11.
+- **Topk-hard** (Reds): Similar pattern to softk but with uniform weight (all selected experts receive equal ~0.5 weight), lacking the intensity variation of soft routing.
+
+**Key Insight**: The hash diagonal pattern provides visual proof of content-agnostic routing—expert selection depends purely on token position, cycling deterministically. This contrasts sharply with learned strategies where vertical/horizontal patterns emerge based on token content and expert specialization.
+
+### 6.10 Annotated Pareto Frontier
+![Annotated Pareto Frontier](../results/unified_frontier_annotated.png)
+*Figure 14: Annotated Pareto frontier showing routing strategy trade-offs (E=8, K=2). The y-axis is inverted so better PPL (lower) appears at top. Three operating regimes are highlighted: Best Quality (green, accuracy-critical applications), Balanced Trade-off (blue), and High Throughput (red, latency-critical applications). Circle markers indicate CF=1.0, squares indicate CF=1.25.*
+
+**Analysis**:
+The annotated frontier reveals clear operating regimes for MoE routing strategy selection:
+
+1. **Best Quality Zone** (green, upper-left): Expert-choice and softk with CF=1.25 achieve the lowest perplexity (5.50-5.55), making them ideal for accuracy-critical applications like high-stakes language modeling or knowledge-intensive tasks. The ~25% throughput reduction compared to top-1 is justified by 15-20% perplexity improvement.
+
+2. **Balanced Trade-off Zone** (blue, middle): Topk-hard (CF=1.25) at PPL=6.15 offers a middle ground—better quality than hash/top-1 while maintaining ~30M tokens/s throughput. Suitable for general-purpose deployments balancing quality and efficiency.
+
+3. **High Throughput Zone** (red, lower-right): Top-1 achieves ~33-34M tokens/s, the fastest among all strategies. Despite worst perplexity (6.69-6.87), it's appropriate for latency-critical serving where response time dominates, or as a baseline for efficiency comparisons.
+
+**Capacity Factor Effect**: CF=1.25 (squares) consistently outperforms CF=1.0 (circles) within each strategy, achieving lower perplexity with minimal throughput impact. This validates our recommendation that CF≈1.25 is a safe default to eliminate token dropping.
+
+**Hash Anomaly**: Hash routing (purple) sits off the Pareto frontier—it achieves neither best quality nor best throughput, confirming that content-agnostic routing is suboptimal in all operating regimes despite its perfect load balance.
+
+### 6.11 Expert Specialization by Character Type
+![Expert Preference by Character Type](../results/token_routing_colored_by_char_type.png)
+*Figure 15: Expert preference by character type (letter, space, punctuation) across routing strategies. Each bar shows what percentage of a given character type is routed to each expert. Data from inference on TinyStories validation set using trained checkpoints (E=8, K=2, CF=1.25).*
+
+**Analysis**:
+This visualization reveals how different routing strategies learn to specialize experts by character type:
+
+1. **Hash - Perfect Uniform Distribution (Baseline Verification)**:
+   - All character types (letter/space/punct) are uniformly distributed across 8 experts (~12-15% each)
+   - Confirms hash is completely **content-agnostic**, routing purely by position
+   - Serves as a control group showing what "no learning" looks like
+
+2. **Learned Routing - Strong Space Preference**:
+   | Strategy | Space → Expert | Concentration |
+   |----------|----------------|---------------|
+   | expert-choice | Expert 1 | ~70% |
+   | softk | Expert 0 | ~95%+ |
+   | top1 | Expert 0 | ~95%+ |
+   | topk-hard | Expert 0 | ~95%+ |
+
+   Spaces are almost entirely routed to a single expert, demonstrating that models learn to dedicate specific experts to "structural" characters.
+
+3. **Punctuation Clustering**: Punctuation marks also show expert preferences—softk/top1/topk-hard route punctuation primarily to Experts 0 and 7, while expert-choice distributes them across Experts 1, 4, and 7.
+
+4. **Letters Spread Across Multiple Experts**: As the primary content characters, letters are distributed more broadly but still show preferences (e.g., softk/top1 favor Experts 0 and 7).
+
+**Key Insight**: Routing learns to specialize by **syntactic role rather than semantic content**. This aligns with findings from the Mixtral paper, which observed that expert assignment correlates with syntax (punctuation, conjunctions) rather than topic or domain. The emergence of a "space/punctuation expert" is a natural optimization—these high-frequency, low-information characters benefit from dedicated processing.
+
+### 6.12 Token-Expert Routing Colored Visualization
+![Token Routing Colored](../results/token_routing_colored.png)
+*Figure 16: Colored text visualization showing token-expert routing assignments. Each character is colored by its primary assigned expert (8 colors for 8 experts). Sample text from TinyStories validation set.*
+
+**Analysis**:
+This Mixtral-style visualization provides a qualitative view of routing patterns:
+
+- **Hash**: Exhibits a clear **periodic color pattern**—colors cycle in fixed order (red→blue→green→orange→...) regardless of character content. This visually confirms deterministic position-based routing with no content awareness.
+
+- **Learned Strategies** (expert-choice, softk, top1, topk-hard): Show more irregular patterns with visible clustering:
+  - Spaces consistently appear in similar colors (often red/Expert 0)
+  - Punctuation marks (`.`, `,`) also cluster
+  - Letters show more varied coloring
+
+- **Cross-Strategy Similarity**: Interestingly, all learned routing strategies produce visually similar patterns, suggesting they converge to similar "what character goes where" solutions at this small scale. The differences become more apparent in the quantitative analysis (Figure 15).
+
+**Limitation**: At character-level with a small model (E=8, dim=256, 1200 steps), semantic specialization is limited. Subword tokenization or larger models would likely show richer expert specialization patterns.
+
 ## 7. Discussion
 
 ### 7.1 Connecting Results to Literature
@@ -486,22 +599,8 @@ Our findings have direct implications for **PERFT** (Parameter-Efficient Routed 
 
 PERFT introduces routed PEFT modules that leverage MoE routing for adapter selection. Our benchmark results inform which routing strategies are best suited for each PERFT variant:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    PERFT Variants Overview                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Input Token ──► Router ──┬──► Expert 1 + LoRA_1 ──┐            │
-│                           ├──► Expert 2 + LoRA_2 ──┼──► Output  │
-│                           └──► Expert E + LoRA_E ──┘            │
-│                                                                 │
-│  PERFT-R (Routed):     Independent routing for PEFT experts     │
-│  PERFT-E (Embedded):   Reuse base MoE routing for PEFT          │
-│  PERFT-D (Dense):      Shared adapter across all experts        │
-│  PERFT-S (Single):     Single adapter as additional expert      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+![PERFT Architecture Variants](../figures/perft_architecture.png)
+*Figure 17: PERFT (Parameter-Efficient Routed Fine-Tuning) architecture variants (Liu et al., 2024). **PERFT-R** (Routed): Independent trainable router selects among LoRA adapter experts, enabling task-specific specialization—achieves best performance with up to 17% improvement over MoE-agnostic baselines. **PERFT-E** (Embedded): LoRA adapters embedded within frozen MoE experts, sharing the base router—good balance of simplicity and performance. **PERFT-D** (Dense): Multiple always-active adapters without routing. **PERFT-S** (Single): Single shared adapter as baseline. Key insight: Independent adapter routing (PERFT-R) enables task-specific expert specialization that outperforms shared approaches.*
 
 **Routing Strategy Recommendations for PERFT**:
 
@@ -780,6 +879,33 @@ python scripts/plot_perft_variants.py
 
 # Run tests
 pytest -q
+
+# Expert Load Distribution visualization (from trained checkpoints)
+python scripts/plot_expert_load_distribution.py \
+    --runs "runs/unified_*_cf1_25" \
+    --data data/tinystories_val.txt \
+    --out results/expert_load_distribution.png \
+    --device cuda
+
+# Token-Expert Routing Heatmap (from trained checkpoints)
+python scripts/plot_routing_heatmap.py \
+    --runs "runs/unified_*_cf1_25" \
+    --data data/tinystories_val.txt \
+    --out results/routing_heatmap.png \
+    --device cuda
+
+# Annotated Pareto Frontier (from unified sweep summary)
+python scripts/plot_pareto_annotated.py \
+    --summary results/unified_summary.csv \
+    --out results/unified_frontier_annotated.png
+
+# Colored Token Routing Visualization (from trained checkpoints)
+python scripts/plot_token_routing_colored.py \
+    --runs "runs/unified_*_cf1_25" \
+    --data data/tinystories_val.txt \
+    --out results/token_routing_colored.png \
+    --device cuda \
+    --num-chars 400
 ```
 
 ## Appendix B: Code Structure
