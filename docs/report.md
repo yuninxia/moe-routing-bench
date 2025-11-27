@@ -387,38 +387,50 @@ This validates that our conclusions about routing strategy trade-offs **generali
 
 ### 6.1 Capacity Sweep
 ![Capacity Sweep Drop Rate](../results/capacity_drop_rate_multi.png)
-*Figure 1: Drop rate vs. capacity factor across different E/K configurations in the pack/combine microbenchmark. CF=1.05–1.10 achieves near-zero drop rate.*
+*Figure 1: Drop rate vs. capacity factor across different E/K configurations in the pack/combine microbenchmark. CF≈1.05–1.10 drives drop rate to ~0 across all E/K; even E=256 only needs ~1.1 to hit zero.*
 
 ![Capacity Sweep Tokens/s](../results/capacity_tokens_per_s_multi.png)
-*Figure 2: Throughput vs. capacity factor. Throughput is nearly flat across CF; K is the dominant cost factor.*
+*Figure 2: Throughput vs. capacity factor. Throughput is nearly flat from CF 0.9→1.5; you can raise CF to eliminate drops “for free”. K remains the dominant cost factor.*
+
+**Takeaways for CF**:
+- At CF≈0.9: ~10% drops across all (E,K).
+- At CF≈1.0–1.05: drop rate plummets toward zero.
+- By CF≈1.1–1.25: drops are essentially zero for all E/K (larger E shifts the curve slightly, but ~1.1 suffices).
+- Throughput is essentially unchanged as CF increases → **CF≈1.05–1.10 is a safe default** to avoid token dropping without paying a speed penalty.
 
 ### 6.2 Unified Router Sweep (Character-level)
 ![Unified Frontier](../results/unified_frontier.png)
 *Figure 3: Pareto frontier of throughput vs. perplexity from end-to-end training with character-level tokenization. Soft routing strategies (softk, expert_choice) dominate the frontier.*
 
 ![Unified Overlay](../results/unified_overlay.png)
-*Figure 4: Training curves showing perplexity and loss evolution across routing strategies (character-level).*
+*Figure 4: Training curves (CF=1.25) showing perplexity and loss evolution across routing strategies (character-level). SoftK/Expert-Choice converge fastest to the lowest loss/PPL; top-k hard and hash are slower but mid-tier; top-1 converges slowest and ends with the highest PPL, despite being the fastest in throughput.*
 
 ### 6.3 Larger Scale Validation
 ![Larger Scale Frontier](../results/larger_scale_frontier.png)
 *Figure 5: Pareto frontier at larger scale (E=32, dim=512, layers=4). Expert-choice achieves both best perplexity and highest throughput among K=2 strategies.*
 
-![Larger Scale TFLOPs](../results/larger_scale_frontier_tflops.png)
-*Figure 6: Effective TFLOPs vs. perplexity at larger scale. Expert-choice achieves 66.9 TFLOPs with PPL=3.86.*
-
 ![Larger Scale Overlay](../results/larger_scale_overlay.png)
-*Figure 7: Training curves at larger scale showing convergence behavior across routing strategies.*
+*Figure 6: Training curves at larger scale showing convergence behavior across routing strategies.*
 
-### 6.4 Subword Tokenization Validation
+**Larger-scale convergence (E=32, dim=512, L=4, CF=1.5, K=2 unless top1):**
+- SoftK and Expert-Choice converge best (lowest train/val loss and PPL).
+- Top-1 converges slowest in quality (highest PPL) but is fastest in throughput.
+- Top-k Hard and Hash sit in between soft and top-1 on quality and speed.
+
+### 6.4 Router Architecture vs Strategy (E=8)
+![Router Arch Frontier](../results/router_arch_frontier.png)
+*Figure 7: Router architecture × strategy frontier (E=8, K=2, CF=1.25). SoftK/Expert-Choice remain best in PPL across arches; Top-1 is fastest but worst PPL; Top-k Hard in between. Router_arch (linear vs mlp vs mlp_hadamard) shifts PPL/throughput only slightly compared to routing strategy choice.*
+
+### 6.5 Subword Tokenization Validation
 ![Subword Frontier](../results/subword_frontier.png)
 *Figure 8: Pareto frontier with BPE subword tokenization. The strategy ranking (expert_choice > softk > top1) remains consistent with character-level results.*
 
 ![Subword Overlay](../results/subword_overlay.png)
 *Figure 9: Training curves with subword tokenization confirm soft routing strategies achieve better convergence.*
 
-### 6.5 Load Balance vs Gate Entropy (Unified)
-![Gate Balance](../results/gate_balance_unified.png)
-*Figure 10: Scatter of load_cv vs gate_entropy for unified sweep (points annotated with k). Hard routes (top1/topk-hard) have zero entropy and higher load_cv; hash has perfect balance but random gating; softk/expert_choice achieve moderate entropy with lower load_cv.*
+### 6.6 Load-Balance vs PPL (Unified)
+![Load vs PPL](../results/unified_load_vs_ppl.png)
+*Figure 10: mean_load_cv vs best_val_ppl. Hash achieves perfect balance but worst PPL; softk/expert-choice sit at moderate load_cv with best PPL; hard routes (top1/topk-hard) have high load_cv and poorer PPL. Load balance alone does not guarantee quality.*
 
 ## 7. Discussion
 
@@ -430,11 +442,11 @@ Our experimental findings align with and extend several key results from the MoE
 
 **Validating Expert Choice's load balance claims**: Our expert_choice implementation achieves excellent load balance (CV ~0.2) with minimal token dropping, consistent with Zhou et al.'s findings. However, we observe that this comes at a throughput cost compared to top-1/top-k hard routing.
 
-**Supporting Soft MoE's differentiability hypothesis**: The strong performance of softk routing supports Puigcerver et al.'s argument that differentiable routing alleviates optimization difficulties. The non-zero gate entropy of soft routes indicates meaningful probability distributions over experts.
+**Supporting Soft MoE's differentiability hypothesis**: The strong performance of softk routing supports Puigcerver et al.'s argument that differentiable routing alleviates optimization difficulties. The non-zero gate entropy of soft routes indicates meaningful probability distributions over experts. (In our tested small-scale settings; absolute numbers are not directly comparable to larger models/papers.)
 
 **Hash as a load balance baseline**: Our hash routing experiment provides a clean ablation: perfect load balance with random assignment yields significantly worse perplexity than all learned methods. This definitively shows that **content-aware routing is essential**, not merely load balance.
 
-**Parallel vs. Sequential Expert Execution (Chain-of-Experts)**: Our benchmark employs parallel expert execution—all selected experts process the token simultaneously, and outputs are combined via weighted sum. This contrasts with Chain-of-Experts (CoE) by Wang et al. [6], which proposes sequential expert processing where tokens pass through a chain of experts iteratively, with **dedicated routers at each iteration step** enabling dynamic re-routing as representations evolve.
+**Parallel vs. Sequential Expert Execution (Chain-of-Experts)**: Our benchmark employs parallel expert execution—all selected experts process the token simultaneously, and outputs are combined via weighted sum. This contrasts with Chain-of-Experts (CoE) by Wang et al. [6, arXiv:2506.18945] (technical report), which proposes sequential expert processing where tokens pass through a chain of experts iteratively, with **dedicated routers at each iteration step** enabling dynamic re-routing as representations evolve.
 
 CoE's key insight is that traditional MoE treats experts as independent modules, but sequential communication enables richer expert composition. On math reasoning tasks, CoE reduces validation loss from 1.20 to 1.12 compared to standard MoE, and achieves an **823× increase in expert combinations** through iterative routing.
 
@@ -499,10 +511,11 @@ PERFT introduces routed PEFT modules that leverage MoE routing for adapter selec
 | PERFT-E | Match base model | Inherit routing for consistency |
 | PERFT-D/S | Any (routing-agnostic) | Shared adapter bypasses routing |
 
-**Small-scale PERFT frontier.** We ran a lightweight PERFT sweep on the commonsense_170k QA dataset (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. Activated parameter efficiency is computed as (TopK/N)×(LoRA rank / 16); performance is 1/PPL (lower PPL = higher score). The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`) shows:
+**Small-scale PERFT frontier (qualitative).** We ran a lightweight PERFT sweep on the commonsense_170k QA dataset (ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)} plus Shared) using `scripts/run_perft_variants_quick.sh`. Activated parameter efficiency is computed as (TopK/N)×(LoRA rank / 16); performance is 1/PPL (lower PPL = higher score). The Fig.4-style frontier (`results/perft_variants/perft_frontier_loss_vs_eff.png`) shows:
 - **PERFT-R dominates**: For a given efficiency, PERFT-R points sit at higher 1/PPL than PERFT-E and Shared.
 - **Efficiency sweet spot**: Sparse Top1/8 or Top1/4 with rank 8–16 already reaches near-best performance; increasing rank/TopK yields smaller gains.
 - **PERFT-E vs Shared**: Embedded adapters clearly outperform shared adapters at similar efficiency.
+  (Absolute numbers are not comparable to the original PERFT paper; we focus on relative trends in our small-scale runs.)
 
 This mirrors the PERFT paper’s trend (R > E > Shared) even under short training, supporting the “routed adapters > shared” conclusion for parameter-efficient fine-tuning.
 
@@ -605,7 +618,7 @@ DeepSeek-V3 implements this through **dynamic bias terms** added to routing scor
 - Underloaded experts receive increased biases
 - Update rule: `b_i = b_i + γ × sign(load_error_i)`
 
-Our experiments use traditional auxiliary loss (α=0.01), placing our benchmark in the "pre-DeepSeek-V3" era. However, our finding that **expert_choice achieves near-perfect load balance (CV ~0.2) without heavy auxiliary loss** suggests that routing direction inversion may be an alternative path to the same goal—achieving balance without degrading quality.
+Our experiments use traditional auxiliary loss (α=0.01), placing our benchmark in the "pre-DeepSeek-V3" era. However, our finding that **expert_choice achieves near-perfect load balance (CV ~0.2) without heavy auxiliary loss** suggests that routing direction inversion may be an alternative path to the same goal—achieving balance without degrading quality (in our tested small-scale settings).
 
 #### 7.4.3 Positioning Our Strategies on the Dynamic Routing Spectrum
 
@@ -742,6 +755,7 @@ bash scripts/run_and_plot_experiment_b.sh
 # Unified router sweep (end-to-end training, E=8)
 GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_unified.sh
 bash scripts/summarize_plot_unified.sh
+python scripts/plot_unified_load_ppl.py --summary results/unified_summary.csv --out-dir results
 
 # Larger scale validation (E=32, dim=512, layers=4)
 GPU_IDS=0,1,2,3 bash scripts/run_experiment_larger_scale.sh
@@ -750,6 +764,19 @@ bash scripts/summarize_plot_larger_scale.sh
 # Subword tokenization validation (BPE)
 GPU_IDS=0,1,2,3 bash scripts/run_experiment_subword.sh
 bash scripts/summarize_plot_subword.sh
+
+# Router architecture sweep (E=8, K=2, CF=1.25)
+GPU_IDS=0,1,2,3 bash scripts/run_router_arch_sweep.sh
+python scripts/plot_router_arch_sweep.py --runs 'runs/router_arch_sweep/arch_*' --out results/router_arch_frontier.png --table results/router_arch_summary.csv
+
+# PERFT small-scale frontier (R/E/Shared; ranks 8/16/32; TopK/N=1/2 over N=4/8)
+HF_HOME=/scratch/yx87/playground/moe-routing-bench/.cache/hf \
+GPU_IDS=0,1,2,3 \
+RANK_LIST="8 16 32" \
+PEFT_EXPERTS_LIST="4 8" \
+TOPK_LIST="1 2" \
+bash scripts/run_perft_variants_quick.sh
+python scripts/plot_perft_variants.py
 
 # Run tests
 pytest -q
@@ -776,5 +803,9 @@ scripts/
 ├── run_and_plot_experiment_b.sh # Capacity sweep runner
 ├── run_experiment_unified.sh   # Unified router sweep runner
 ├── summarize_plot_unified.sh   # Unified sweep summarization
-└── plot_*.py                   # Visualization utilities
+├── run_router_arch_sweep.sh    # Router arch × strategy sweep
+├── summarize_plot_larger_scale.sh # Larger-scale summarization
+├── run_perft_variants_quick.sh # PERFT small-scale sweep
+├── plot_*.py                   # Visualization utilities
+└── plot_unified_load_ppl.py    # Load vs PPL plots
 ```

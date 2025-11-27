@@ -30,6 +30,7 @@ class MoEFeedForward(nn.Module):
         activation: str = "gelu",
         load_balance_alpha: float = 1e-2,
         bias: bool = True,
+        router_arch: str = "linear",
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -40,10 +41,10 @@ class MoEFeedForward(nn.Module):
         self.capacity_factor = capacity_factor
         self.renorm_after_drop = renorm_after_drop
         self.load_balance_alpha = load_balance_alpha
+        self.router_arch = router_arch
 
-        self.router_linear = nn.Linear(hidden_dim, num_experts, bias=True)
-        nn.init.normal_(self.router_linear.weight, mean=0.0, std=hidden_dim ** -0.5)
-        nn.init.zeros_(self.router_linear.bias)
+        self._build_router_net(hidden_dim, num_experts)
+        self.router_params = sum(p.numel() for p in self.router_modules.parameters())
 
         self.experts = GroupFFNExperts(
             num_experts=num_experts,
@@ -52,6 +53,51 @@ class MoEFeedForward(nn.Module):
             activation=activation,
             bias=bias,
         )
+
+    def _build_router_net(self, hidden_dim: int, num_experts: int) -> None:
+        """Initialize router network based on router_arch."""
+
+        self.router_modules = nn.ModuleList()
+        arch = self.router_arch.lower()
+        if arch == "linear":
+            linear = nn.Linear(hidden_dim, num_experts, bias=True)
+            nn.init.normal_(linear.weight, mean=0.0, std=hidden_dim ** -0.5)
+            nn.init.zeros_(linear.bias)
+            self.router_linear = linear
+            self.router_modules.append(linear)
+        elif arch == "mlp":
+            hidden = max(64, hidden_dim // 2)
+            mlp = nn.Sequential(
+                nn.Linear(hidden_dim, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, num_experts),
+            )
+            self.router_mlp = mlp
+            self.router_modules.append(mlp)
+        elif arch == "mlp_hadamard":
+            mlp = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            out = nn.Linear(hidden_dim, num_experts)
+            self.router_mlp = mlp
+            self.router_out = out
+            self.router_modules.append(mlp)
+            self.router_modules.append(out)
+        else:
+            raise ValueError(f"Unsupported router_arch: {arch}")
+
+    def _router_logits(self, x_2d: Tensor) -> Tensor:
+        arch = self.router_arch.lower()
+        if arch == "linear":
+            return self.router_linear(x_2d)
+        if arch == "mlp":
+            return self.router_mlp(x_2d)
+        if arch == "mlp_hadamard":
+            h = self.router_mlp(x_2d)
+            return self.router_out(h * x_2d)
+        raise ValueError(f"Unsupported router_arch: {arch}")
 
     def _get_router(self) -> PackCombine:
         return get_router(self.router_name)
@@ -97,7 +143,7 @@ class MoEFeedForward(nn.Module):
         hidden = x.shape[-1]
         x_2d = x.reshape(tokens, hidden)
 
-        logits = self.router_linear(x_2d)
+        logits = self._router_logits(x_2d)
         topk_idx, gates, k_eff = self._route(logits)
         capacity = self._capacity(tokens, k_eff)
 
@@ -237,6 +283,10 @@ class MoEFeedForward(nn.Module):
         gate_entropy = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
         if gates is not None:
             gate_entropy = -(gates * (gates.clamp_min(1e-9).log())).sum(dim=-1).mean()
+            mean_topk_prob = gates.max(dim=-1).values.mean()
+        else:
+            mean_topk_prob = torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
+        mean_topk_prob = mean_topk_prob.detach()
 
         return {
             "drop_rate": torch.tensor(avg_drop, device=logits.device),
@@ -246,4 +296,6 @@ class MoEFeedForward(nn.Module):
             "aux_loss": aux_loss,
             "gate_entropy": gate_entropy,
             "expert_counts": counts,
+            "router_params": torch.tensor(float(self.router_params), device=logits.device, dtype=logits.dtype),
+            "mean_topk_prob": mean_topk_prob,
         }

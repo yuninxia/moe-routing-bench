@@ -21,42 +21,53 @@
 - Model/data: TinyMoE (E=8, dim=256, L=4), TinyStories (char + BPE).
 - Scripts: `train_small.py`, `bench_capacity.py`, `summarize_runs.py`, `plot_frontier.py`.
 - Metrics per eval: PPL, tokens/s, drop_rate, load_cv, gate_entropy, eff_TFLOPs.
-- Hardware: 4× L40S; runs 500–1200 steps; all commands reproducible in repo.
+- Hardware: 4× L40S (BF16), DDP; runs 500–2000 steps; all commands reproducible in repo.
+- Data: TinyStories (char) + BPE tokenizer (`EleutherAI/gpt-neo-125M`); PERFT sweep uses commonsense_170k QA.
+- Models/configs: TinyMoE E=8 (dim=256, L=4, K=2; top1 uses K=1); larger scale E=32 (dim=512, L=4, K=2, CF=1.5).
 
 ## Page 5 – Capacity Factor Sweep
-- Figure: `../results/capacity_drop_rate_multi.png` (+ inset `capacity_tokens_per_s_multi.png`).
+![Capacity Sweep Drop Rate](../results/capacity_drop_rate_multi.png)
+![Capacity Sweep Throughput](../results/capacity_tokens_per_s_multi.png)
 - Takeaways:
   - CF 1.05–1.10 ≈ zero drops; throughput change <2%.
   - Practical default: CF ≈ 1.1–1.25.
   - CF tunes dropping/load, not content awareness.
 
 ## Page 6 – Unified Router Frontier (E=8)
-- Figure: `../results/unified_frontier.png` (PPL vs tokens/s).
+![Unified Frontier](../results/unified_frontier.png)
 - Takeaways:
   - Quality: expert_choice ≈ softk < hash < topk-hard < top1.
   - Speed: top1 fastest; softk/EC ~20–25% slower.
   - Hash: perfect balance, worst PPL → balance alone is insufficient.
 
-## Page 7 – Larger Scale & Subword
-- Figures: `../results/larger_scale_frontier.png` (E=32), `../results/subword_frontier.png` (BPE).
-- Takeaways:
-  - Ranking persists at larger scale and with BPE.
-  - Expert-choice/softk remain best-quality; trends not a toy artifact.
+## Page 7 – Unified Convergence (E=8, CF=1.25)
+![Unified Overlay](../results/unified_overlay.png)
+- Takeaways: SoftK/EC converge fastest/lowest; top-k hard/hash mid-tier; top-1 slowest/highest PPL (fastest throughput but worst quality).
 
-## Page 8 – PERFT Frontier (Adapter Routing)
-- Figure: `../results/perft_variants/perft_frontier_loss_vs_eff.png` (1/PPL vs activated param efficiency).
-- Config: commonsense_170k QA dataset; ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)}; 500 steps.
-- Takeaways:
-  - PERFT-R dominates; PERFT-E > Shared at same efficiency.
-  - Sweet spot: sparse Top1/8 or Top1/4, rank 8–16; higher rank → diminishing returns.
-  - Routed adapters deliver more performance per activated parameter.
+## Page 8 – Router Architecture × Strategy
+![Router Arch Frontier](../results/router_arch_frontier.png)
+- Takeaways: SoftK/EC still best; Top-1 fastest/worst; Top-k Hard between. Changing router_arch (linear/mlp/hadamard) only slightly shifts PPL/throughput vs strategy choice.
 
-## Page 9 – Implications (Systems / PERFT / Serving)
-- MoE systems: use softk/EC for quality; CF≈1.1–1.25 to remove drops; hash ≠ quality fix.
+## Page 9 – Larger Scale & Subword
+![Larger Scale Frontier](../results/larger_scale_frontier.png)
+![Subword Frontier](../results/subword_frontier.png)
+- Takeaways: Ranking persists at larger scale and with BPE; SoftK/EC remain best-quality; not a toy artifact.
+
+## Page 10 – PERFT Frontier (Adapter Routing)
+![PERFT Frontier](../results/perft_variants/perft_frontier_loss_vs_eff.png)
+- Config: commonsense_170k QA dataset; ranks 8/16/32; TopK/N ∈ {(1,4), (2,4), (1,8), (2,8)}; 500 steps (qualitative trend).
+- Takeaways: PERFT-R dominates; PERFT-E > Shared; sweet spot: sparse Top1/8 or Top1/4, rank 8–16; higher rank → diminishing returns.
+
+## Page 11 – Load Balance vs Quality
+![Load vs PPL](../results/unified_load_vs_ppl.png)
+- Takeaway: Hash has perfect balance but worst PPL; SoftK/EC moderate load_cv with best PPL; hard routes high load_cv, worse PPL → load balance alone ≠ quality.
+
+## Page 12 – Implications (Systems / PERFT / Serving)
+- MoE systems: use softk/EC for quality; CF≈1.1–1.25 to remove drops “for free”; hash not a quality fix.
 - PERFT/routed PEFT: prefer routed (R/E) over shared; balanced routing keeps adapters trained.
 - Serving (vLLM/Mixtral-style): top-2/soft routing + tuned CF for quality/latency balance.
 
-## Page 10 – Conclusion & Next Steps
+## Page 13 – Conclusion & Next Steps
 - Routing ranking stable across CF, scale (E=8→32), tokenizer (char→BPE); CF sweet spot identified.
-- PERFT frontier matches paper trend (R > E > Shared) even in short runs.
+- PERFT frontier matches paper trend (R > E > Shared) even in short runs (qualitative).
 - Next: parallel K=2 vs sequential CoE; deeper BPE runs; plug into serving stack; explore aux-loss-free balancing.

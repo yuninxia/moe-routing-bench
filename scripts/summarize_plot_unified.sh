@@ -32,7 +32,8 @@ if (( ${#LOGS[@]} > 0 )); then
     --logs "${LOGS[@]}" \
     --metrics "train_loss,val_loss,ppl" \
     --out "${OVERLAY}" \
-    --title "Unified sweep: train/val/ppl"
+    --title "Unified (E=8, CF=1.25): Train/Val/PPL" \
+    --filter-cf 1.25
 fi
 
 echo "Summary CSV: ${SUMMARY}"

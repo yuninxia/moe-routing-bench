@@ -29,6 +29,12 @@ python -m venv .venv
 . .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
+```
+
+## Hardware / Data / Models
+- Hardware: 4× NVIDIA L40S (BF16), DDP; typical runs 500–2000 steps.
+- Data: TinyStories (char) and BPE tokenizer (`EleutherAI/gpt-neo-125M`); PERFT sweep uses `commonsense_170k` QA.
+- Models/configs: TinyMoE E=8 (dim=256, L=4, K=2; top1 uses K=1); larger scale E=32 (dim=512, L=4, K=2, CF=1.5).
 
 ## Quick Start
 
@@ -45,14 +51,13 @@ python scripts/export_tinystories.py --split validation --out data/tinystories_v
 # Unified router sweep (E=8, char-level)
 GPU_IDS=0,1,2,3 MAX_STEPS=1200 EVAL_INTERVAL=200 bash scripts/run_experiment_unified.sh
 bash scripts/summarize_plot_unified.sh
-python scripts/plot_gate_balance.py --summary results/unified_summary.csv --out results/gate_balance_unified.png
 ```
 
 **Unified outputs**:
 - `results/unified_summary.csv`
 - `results/unified_frontier.png`
 - `results/unified_overlay.png`
-- `results/gate_balance_unified.png`
+- (optional) `results/unified_load_vs_ppl.png` via `python scripts/plot_unified_load_ppl.py --summary results/unified_summary.csv --out-dir results`
 
 ## Reproducing All Experiments
 

@@ -289,6 +289,8 @@ LOG_STAT_KEYS = [
     "used_capacity",
     "aux_loss",
     "gate_entropy",
+    "router_params",
+    "mean_topk_prob",
 ]
 
 
@@ -409,6 +411,13 @@ def parse_args() -> argparse.Namespace:
         default="softk",
         help="Routing strategy: top1, topk-hard, softk, expert-choice, hash",
     )
+    parser.add_argument(
+        "--router-arch",
+        type=str,
+        default="linear",
+        choices=["linear", "mlp", "mlp_hadamard"],
+        help="Router network architecture (linear, 2-layer MLP, or Hadamard MLP).",
+    )
     parser.add_argument("--capacity-factor", type=float, default=1.25)
     parser.add_argument("--renorm-after-drop", action="store_true")
     parser.add_argument("--router", type=str, default="torch_soft", choices=["torch_soft"], help="Routing backend (Torch reference)")
@@ -524,6 +533,7 @@ def main() -> None:
         renorm_after_drop=args.renorm_after_drop,
         ffn_mult=args.ffn_mult,
         load_balance_alpha=args.load_balance_alpha,
+        router_arch=args.router_arch,
     )
 
     model = TinyMoEModel(
@@ -660,6 +670,8 @@ def main() -> None:
                     "used_capacity": log_stats["used_capacity"],
                     "aux_loss": log_stats["aux_loss"],
                     "gate_entropy": log_stats["gate_entropy"],
+                    "router_params": log_stats["router_params"],
+                    "mean_topk_prob": log_stats["mean_topk_prob"],
                     "ffn_flops_per_token": ffn_flops,
                     "router_flops_per_token": router_flops,
                     "eff_tflops": eff_tflops,
@@ -670,6 +682,7 @@ def main() -> None:
                     "strategy": args.strategy,
                     "routing_strategy": args.strategy.replace('_', '-'),
                     "router_backend": args.router,
+                    "router_arch": args.router_arch,
                     "capacity_factor": args.capacity_factor,
                     "world_size": world_size,
                     "tokens_seen": tokens_seen,
