@@ -151,9 +151,37 @@ We implement **TinyMoEModel**, a Transformer language model with MoE feed-forwar
 
 - **Architecture**: Embedding → N × TransformerBlock → LayerNorm → Output Head
 - **TransformerBlock**: LayerNorm → MultiheadAttention → Residual → LayerNorm → MoEFeedForward → Residual
-- **MoEFeedForward**: Router Linear → Routing Strategy → Pack → GroupFFNExperts → Combine
+- **MoEFeedForward**: Router Network → Routing Strategy → Pack → GroupFFNExperts → Combine
 
 Default hyperparameters: `dim=256, layers=2-4, heads=4, num_experts=8, ffn_mult=4, dtype=bf16`
+
+#### 3.1.1 Router Network (Gating Network)
+
+The router network (also called **gating network**) determines which experts process each token. The standard formulation from Shazeer et al. (2017) is:
+
+```
+logits = x · W_r + b       # Linear transformation
+G(x) = Softmax(logits)     # Probability distribution over experts
+```
+
+Where:
+- `x ∈ ℝ^d`: Token hidden representation (input)
+- `W_r ∈ ℝ^{d×E}`: **Learnable** router weight matrix
+- `b ∈ ℝ^E`: Learnable bias
+- `logits ∈ ℝ^E`: Raw routing scores (one per expert)
+- `G(x) ∈ ℝ^E`: Routing probabilities
+
+The router weights `W_r` are trained **jointly** with expert parameters through backpropagation. This joint training is essential—Farhat et al. (2023) prove that decoupled training leads to suboptimal expert specialization.
+
+**Our implementation** supports three router architectures via `--router-arch`:
+
+| Architecture | Formula | Parameters |
+|--------------|---------|------------|
+| `linear` (default) | `logits = x · W + b` | d × E + E |
+| `mlp` | `logits = Linear(GELU(Linear(x)))` | d × h + h × E |
+| `mlp_hadamard` | `logits = Linear(MLP(x) ⊙ x)` | 2 × d² + d × E |
+
+Where `⊙` denotes element-wise (Hadamard) product. The `mlp_hadamard` variant introduces a residual-style connection that can capture more complex routing patterns
 
 ![MoE Architecture](../figures/moe_architecture.png)
 *Figure 1: MoE Feed-Forward Layer architecture. Input tokens x ∈ ℝ^{T×d} pass through a router W_r to produce gating logits g ∈ ℝ^{T×E}. Top-k selection yields expert indices I and combination weights w. The Dispatch (Pack) operation reorganizes tokens into expert-specific buffers x_e ∈ ℝ^{E×C×d}, where capacity C = ⌈α·Tk/E⌉. Each expert FFN f_e processes its buffer independently, and the Combine operation reconstructs the output y by weighted summation.*

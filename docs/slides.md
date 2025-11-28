@@ -1,52 +1,57 @@
 # Slides Outline
 
 ## Page 1 – Title
-- **Title:** MoE Routing Bench: Routing Trade-offs & PERFT Insights
+- **Title:** MoE Routing Bench: Routing Design, Trade-offs, and PERFT Insights
 - **Subtitle:** Capacity factor, routing frontiers, and routed adapters
 - **Authors:** Yuning Xia (yx87), Daniel Zhang (dfz1), Shaoyang Zhang (sz121), Richard Xu (rgx1)
 - **Course:** COMP 414/514 – Topic 2: Mixture-of-Experts and Learning to Specialize
 
-## Page 2 – Motivation
-- Routing is the bottleneck for MoE quality/stability/throughput.
-- Knobs: routing strategy (top-1/hard/soft/EC/hash), capacity factor (CF), load balance.
-- Gap: many large-scale results, few small, reproducible benches + PERFT linkage.
-- What we did: build a lightweight bench, map Pareto frontiers (routing/CF/scale/tokenizer), bridge to PERFT-style routed adapters.
+## Page 2 – Motivation: The Routing Bottleneck
+- **Title:** The Routing Bottleneck: Why MoE Performance is a Balancing Act
+- MoE scales model capacity efficiently, but its effectiveness hinges on the routing algorithm. Poor routing creates a cascade of problems:
+  - **Load Imbalance**: Some experts are overworked while others are idle, leading to inefficient hardware use and potential routing collapse.
+  - **Token Dropping**: When expert capacity is exceeded, tokens are discarded, resulting in direct information loss and degraded model quality.
+  - **Training Instability**: The discrete, non-differentiable nature of hard routing decisions complicates optimization and can hinder convergence.
+  - **Suboptimal Specialization**: Without effective routing, experts may fail to develop distinct, meaningful functions, negating the primary benefit of the MoE architecture.
 
 ## Page 3 – MoE Evolution Timeline
 ![MoE Evolution Timeline](../figures/moe_evolution_timeline.png)
 - **Timeline**: Key papers from 2017–2024 covering MoE routing evolution.
-- **Core papers**: Sparsely-Gated MoE, DDOME, Soft MoE, PERFT, Chain-of-Experts.
+- **Core papers**: Sparsely-Gated MoE (2017), Soft MoE, PERFT, Chain-of-Experts.
 - **Milestones**: GShard (capacity factor), Switch (top-1), Expert Choice, DeepSeekMoE/V3 (aux-loss-free).
 - **Key trends**: Sparse→Soft | Token→Expert choice | Aux loss→Loss-free | Dense→Routed PEFT.
 
 ## Page 4 – MoE Architecture
 ![MoE Architecture](../figures/moe_architecture.png)
-- **Diagram**: MoE Feed-Forward Layer data flow from input x to output y.
-- Router W_r produces gating logits g; Top-k Selection yields indices I and weights w.
-- Dispatch packs tokens into expert buffers x_e ∈ ℝ^{E×C×d}; Combine reconstructs output.
-- This work: E=8, k∈{1,2}, α∈{1.0,1.25}, 5 routing strategies.
+- **Router Network** (also called Gating Network): learnable layer W_r that maps tokens to expert scores.
+- **MoE Forward Flow**:
+  1. **Router**: W_r produces gating logits g ∈ ℝ^{T×E}
+  2. **Top-k Selection**: yields indices I and weights w
+  3. **Dispatch (Pack)**: tokens → expert buffers x_e ∈ ℝ^{E×C×d}
+  4. **Expert FFN**: each expert processes its assigned tokens
+  5. **Combine**: reconstructs output using weights w
+- This work: E=8, k∈{1,2}, capacity factor (CF)∈{1.0,1.25}, 5 routing strategies.
 
 ## Page 5 – Routing Strategies Comparison
 ![Routing Strategies](../figures/routing_strategies_comparison.png)
 - **Top-1**: T→1 expert (argmax); fastest, high drop rate.
-- **Top-k Hard**: T→k experts, uniform weights; moderate.
-- **Soft Top-k**: T→k experts, learned softmax weights; best PPL.
+- **Top-k Hard**: T→k experts, uniform weights; moderate speed/quality.
+- **Soft Top-k**: T→k experts, softmax weights (from learned router); best/tied PPL.
 - **Hash**: Deterministic position-based; CV=0 but worst quality.
-- **Expert Choice**: E→T selection; balanced by construction.
+- **Expert Choice**: Experts select top tokens; good balance + best/tied PPL.
 
 ## Page 6 – Token Dropping Mechanism
 ![Token Dropping](../figures/token_dropping_mechanism.png)
 - **(a)** Capacity-based slot assignment: tokens exceeding expert capacity C are dropped.
-- **(b)** Drop rate vs capacity factor α: α ≥ 1.05 achieves near-zero drops.
-- Practical default: CF ≈ 1.1–1.25 eliminates drops with <2% memory overhead.
+- **(b)** Drop rate vs capacity factor: CF ≥ 1.05 achieves near-zero drops.
+- Practical default: CF ≈ 1.1–1.25 eliminates drops with <2% memory overhead (also confirmed in Switch Transformer, Fedus et al. 2021).
 
 ## Page 7 – Bench Setup
-- Model/data: TinyMoE (E=8, dim=256, L=4), TinyStories (char + BPE).
-- Scripts: `train_small.py`, `bench_capacity.py`, `summarize_runs.py`, `plot_frontier.py`.
-- Metrics per eval: PPL, tokens/s, drop_rate, load_cv, gate_entropy, eff_TFLOPs.
-- Hardware: 4× L40S (BF16), DDP; runs 500–2000 steps; all commands reproducible in repo.
-- Data: TinyStories (char) + BPE tokenizer (`EleutherAI/gpt-neo-125M`); PERFT sweep uses commonsense_170k QA.
-- Models/configs: TinyMoE E=8 (dim=256, L=4, K=2; top1 uses K=1); larger scale E=32 (dim=512, L=4, K=2, CF=1.5).
+- **Model**: TinyMoE (E=8, dim=256, L=4, K=2); larger scale E=32 (dim=512)
+- **Data**: TinyStories (char + BPE); PERFT uses commonsense_170k QA
+- **Hardware**: 4× L40S (BF16), DDP; 500–2000 steps
+- **Metrics**: PPL, tokens/s, drop_rate, load_cv, gate_entropy
+- **Reproducibility**: All configs and commands available in repo
 
 ## Page 8 – Capacity Factor Sweep
 ![Capacity Sweep Drop Rate](../results/capacity_drop_rate_multi.png)
@@ -54,32 +59,43 @@
 - **Experiment**: Pack/combine microbenchmark; E∈{64,128,256}, K∈{1,2,4}, CF∈{0.9–1.5}; 200 iters each.
 - Takeaways:
   - CF 1.05–1.10 ≈ zero drops; throughput change <2%.
-  - Practical default: CF ≈ 1.1–1.25.
-  - CF tunes dropping/load, not content awareness.
+  - Confirms practical sweet spot: CF ≈ 1.1–1.25.
+  - CF controls capacity/dropping; routing quality depends on strategy choice.
 
 ## Page 9 – Unified Router Frontier (E=8)
 ![Unified Frontier](../results/unified_frontier.png)
 - **Experiment**: End-to-end training on TinyStories (char); E=8, K=2, CF∈{1.0,1.25}; 1200 steps; 4×L40S DDP.
 - Takeaways:
-  - Quality: expert_choice ≈ softk < hash < topk-hard < top1.
+  - Perplexity ranking (lower is better): expert_choice ≈ softk < hash < topk-hard < top1.
   - Speed: top1 fastest; softk/EC ~20–25% slower.
-  - Hash: perfect balance, worst PPL → balance alone is insufficient.
+  - Hash: perfect balance, worst perplexity → balance alone is insufficient.
 
 ## Page 10 – Unified Convergence (E=8, CF=1.25)
 ![Unified Overlay](../results/unified_overlay.png)
 - **Experiment**: Training curves from unified sweep; E=8, K=2, CF=1.25; 1200 steps; 5 strategies.
-- Takeaways: SoftK/EC converge fastest/lowest; top-k hard/hash mid-tier; top-1 slowest/highest PPL (fastest throughput but worst quality).
+- Takeaways:
+  - SoftK/EC: converge fastest, lowest perplexity (best quality)
+  - Top-k Hard/Hash: mid-tier convergence
+  - Top-1: slowest convergence, highest perplexity (fastest throughput but worst quality)
 
 ## Page 11 – Router Architecture × Strategy
 ![Router Arch Frontier](../results/router_arch_frontier.png)
 - **Experiment**: Router arch sweep; E=8, K=2, CF=1.25; router_arch∈{linear,mlp,mlp_hadamard}; 1200 steps.
-- Takeaways: SoftK/EC still best; Top-1 fastest/worst; Top-k Hard between. Changing router_arch (linear/mlp/hadamard) only slightly shifts PPL/throughput vs strategy choice.
+- Takeaways:
+  - Strategy ranking unchanged: SoftK/EC best, Top-1 fastest/worst, Top-k Hard between
+  - Router architecture (linear/mlp/mlp_hadamard) has minimal impact on perplexity/throughput
+  - **Key insight**: Strategy choice matters more than router architecture
 
 ## Page 12 – Larger Scale & Subword
 ![Larger Scale Frontier](../results/larger_scale_frontier.png)
 ![Subword Frontier](../results/subword_frontier.png)
-- **Experiment**: Larger scale: E=32, dim=512, L=4, K=2, CF=1.5, 2000 steps. Subword: BPE (gpt-neo), E=8, K=2, CF=1.25, 1200 steps.
-- Takeaways: Ranking persists at larger scale and with BPE; SoftK/EC remain best-quality; not a toy artifact.
+- **Experiments**:
+  - Larger scale: E=32, dim=512, K=2, CF=1.5, 2000 steps
+  - Subword: BPE tokenizer (gpt-neo), E=8, K=2, CF=1.25, 1200 steps
+- Takeaways:
+  - Strategy ranking persists at larger scale (E=32) and with BPE tokenization
+  - SoftK/EC remain best quality
+  - **Conclusion**: Results are not artifacts of small scale or char-level tokenization
 
 ## Page 13 – PERFT Architecture Variants
 ![PERFT Architecture](../figures/perft_architecture.png)
@@ -87,6 +103,7 @@
 - **PERFT-E (Embedded)**: LoRA adapters embedded in frozen MoE experts, sharing base router → good simplicity/performance trade-off.
 - **PERFT-D (Dense)**: Multiple always-active adapters (no routing) → baseline approach.
 - **PERFT-S (Single)**: Single shared adapter → simplest baseline.
+- **Performance ranking**: PERFT-R ≥ PERFT-E > PERFT-D > PERFT-S
 - **Key insight**: Independent adapter routing enables task-specific expert specialization.
 
 ## Page 14 – PERFT Frontier (Adapter Routing)
@@ -97,7 +114,7 @@
 ## Page 15 – Load Balance vs Quality
 ![Load vs PPL](../results/unified_load_vs_ppl.png)
 - **Experiment**: Unified sweep metrics; E=8, K=2, CF∈{1.0,1.25}; plots mean_load_cv vs best_val_ppl.
-- Takeaway: Hash has perfect balance but worst PPL; SoftK/EC moderate load_cv with best PPL; hard routes high load_cv, worse PPL → load balance alone ≠ quality.
+- Takeaway: Hash has perfect balance but worst perplexity; SoftK/EC moderate load_cv with best perplexity; hard routes high load_cv, worse perplexity → load balance alone ≠ quality.
 
 ## Page 16 – Expert Load Distribution
 ![Expert Load Distribution](../results/expert_load_distribution.png)
@@ -129,9 +146,9 @@
 ![Annotated Pareto Frontier](../results/unified_frontier_annotated.png)
 - **Experiment**: Unified sweep summary; E=8, K=2, CF∈{1.0,1.25}; 5 strategies; annotated with operating regimes.
 - Takeaways:
-  - **Best Quality** (green): expert-choice/softk (CF=1.25) → PPL 5.50-5.55, ~25-26M tok/s
-  - **Balanced** (blue): topk-hard → PPL 6.15, ~30M tok/s
-  - **High Throughput** (red): top1 → PPL 6.69-6.87, ~33-34M tok/s (fastest, worst quality)
+  - **Best Quality** (green): expert-choice/softk (CF=1.25) → perplexity 5.50-5.55, ~25-26M tok/s
+  - **Balanced** (blue): topk-hard → perplexity 6.15, ~30M tok/s
+  - **High Throughput** (red): top1 → perplexity 6.69-6.87, ~33-34M tok/s (fastest, worst quality)
   - CF=1.25 (■) beats CF=1.0 (●) across all strategies
   - Hash off-frontier → content-agnostic routing never optimal
 
@@ -164,3 +181,8 @@
 - Routing ranking stable across CF, scale (E=8→32), tokenizer (char→BPE); CF sweet spot identified.
 - PERFT frontier matches paper trend (R > E > Shared) even in short runs (qualitative).
 - Next: parallel K=2 vs sequential CoE; deeper BPE runs; plug into serving stack; explore aux-loss-free balancing.
+
+## Page 24 – Thank You
+![Token Routing Colored](../figures/thankyou_page.png)
+
+Explore the benchmark and full report: github.com/yuninxia/moe-routing-bench

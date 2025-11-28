@@ -111,7 +111,7 @@ class MoEFeedForward(nn.Module):
         if self.strategy == "top1":
             indices = top1_indices(logits)
             gates = None
-            k_eff = 1
+            k_eff = 1  # effective k: actual number of experts per token, used for capacity calculation
         elif self.strategy == "topk_hard":
             indices = torch.topk(logits, self.top_k, dim=-1).indices
             gates = None
