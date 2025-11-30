@@ -42,6 +42,7 @@ def main() -> None:
     plt.title("Routing frontier: Throughput vs Best PPL")
     plt.legend(title="strategy")
     plt.grid(alpha=0.3)
+    plt.gca().invert_yaxis()  # Lower PPL (better) at top
     plt.savefig(args.out, bbox_inches="tight")
     print("Saved", args.out)
 
@@ -60,6 +61,7 @@ def main() -> None:
     plt.title("Routing frontier: TFLOPs vs Best PPL")
     plt.legend(title="strategy")
     plt.grid(alpha=0.3)
+    plt.gca().invert_yaxis()  # Lower PPL (better) at top
     plt.savefig(out_tflops, bbox_inches="tight")
     print("Saved", out_tflops)
 
